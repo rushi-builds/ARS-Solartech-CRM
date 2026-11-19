@@ -10,9 +10,20 @@ public/            static SPA (index.html, styles.css, app.js)  – no build ste
 src/worker.ts      Hono Worker: auth wrap + role-enforced JSON API
 src/db.ts          data access + capability checks
 src/plan.ts        planning engine (working days, status, capacity)
-schema.sql         D1 schema
+src/schema.ts      idempotent D1 bootstrap (runs on first request)
+schema.sql         D1 schema (same tables, for manual/local runs)
 build.mjs          esbuild bundle + Sites deploy manifest
 ```
+
+## Live URLs
+
+| Environment | URL |
+| --- | --- |
+| Production | https://ars-order-to-dispatch-3qnck5.freebuff.site |
+| Preview | https://ars-order-to-dispatch-3qnck5-preview.freebuff.site |
+
+Both environments have their own D1 database. Tables are created by the Worker
+on its first request (`src/schema.ts`), so a fresh database needs no manual step.
 
 ## What the planner does
 
