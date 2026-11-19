@@ -1,0 +1,19 @@
+{
+  "name": "ars-oms",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "dev": "wrangler dev --config wrangler.dev.jsonc --port 8787",
+    "db:local": "wrangler d1 execute DB --local --config wrangler.dev.jsonc --file=schema.sql"
+  },
+  "dependencies": {
+    "@freebuff/auth": "^0.1.0",
+    "hono": "^4.13.19"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2",
+    "wrangler": "^4.165.0"
+  }
+}

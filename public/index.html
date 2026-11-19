@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="color-scheme" content="dark" />
+<title>ARS Solartech · Order to Dispatch</title>
+<link rel="stylesheet" href="styles.css" />
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%23f5a524'/><path d='M9 22 L16 9 L23 22 Z' fill='%23111016'/></svg>" />
+</head>
+<body>
+
+<!-- ── signed-out gate ───────────────────────────────────────────── -->
+<div id="gate" class="gate" hidden>
+  <div class="gate-card">
+    <div class="brand big">
+      <span class="logo">ARS</span>
+      <div>
+        <h1>Order to Dispatch</h1>
+        <p>Solartech operations control room</p>
+      </div>
+    </div>
+    <ul class="gate-points">
+      <li>Live order pipeline across design, purchase, production, QC and dispatch</li>
+      <li>Working-day forecasts, buffer alerts and plant capacity load</li>
+      <li>Department-wise access — every action is checked on the server</li>
+    </ul>
+    <a class="btn primary large" href="/auth/freebuff/signin?returnTo=/">Sign in with Freebuff</a>
+    <p class="fine">Access is invite-only. The first account to sign in becomes the owner and approves everyone else.</p>
+  </div>
+</div>
+
+<!-- ── app shell ─────────────────────────────────────────────────── -->
+<div id="shell" class="shell" hidden>
+  <aside class="sidebar">
+    <div class="brand">
+      <span class="logo">ARS</span>
+      <div class="brand-text">
+        <strong>Solartech</strong>
+        <small>Order to Dispatch</small>
+      </div>
+    </div>
+
+    <nav id="nav" class="nav"></nav>
+
+    <div class="side-foot">
+      <div class="who">
+        <span id="avatar" class="avatar">?</span>
+        <div>
+          <strong id="whoName">—</strong>
+          <small id="whoRole">—</small>
+        </div>
+      </div>
+      <form method="post" action="/auth/freebuff/signout">
+        <button class="btn ghost small" type="submit">Sign out</button>
+      </form>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <div>
+        <h2 id="pageTitle">Dashboard</h2>
+        <p id="pageSub" class="sub">Loading…</p>
+      </div>
+      <div class="top-actions">
+        <span class="pill live" id="todayPill">—</span>
+        <button class="btn ghost small" id="refreshBtn" title="Reload data">Refresh</button>
+      </div>
+    </header>
+    <section id="view" class="view"></section>
+  </main>
+</div>
+
+<div id="drawer" class="drawer"></div>
+<div id="modal" class="modal-host"></div>
+<div id="toasts" class="toasts"></div>
+
+<script src="app.js"></script>
+</body>
+</html>
