@@ -7,6 +7,7 @@ import {
   type FreebuffAuth,
 } from '@freebuff/auth';
 
+import { ensureSchema } from './schema';
 import {
   DEFAULT_SETTINGS,
   DEPTS,
@@ -78,11 +79,20 @@ function authFor(env: Env): FreebuffAuth {
 const app = new Hono<Ctx>();
 
 // Public readiness probe (registered before the auth guard on purpose).
-app.get('/healthz', (c) => c.json({ ok: true, at: new Date().toISOString() }));
+// Also runs the idempotent schema bootstrap so a fresh deployment is usable.
+app.get('/healthz', async (c) => {
+  try {
+    await ensureSchema(c.env.DB);
+    return c.json({ ok: true, db: 'ready', at: new Date().toISOString() });
+  } catch (err) {
+    return c.json({ ok: false, db: 'error', error: String((err as Error)?.message || err) }, 500);
+  }
+});
 
 // ---------------------------------------------------------------- auth guard
 app.use('/api/*', async (c, next) => {
   c.header('Cache-Control', 'private, no-store');
+  await ensureSchema(c.env.DB);
   const fb = await authFor(c.env).getUser(c.req.raw);
   if (!fb) return c.json({ error: 'signin_required', message: 'Sign in required' }, 401);
 
