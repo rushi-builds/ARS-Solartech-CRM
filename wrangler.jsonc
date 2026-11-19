@@ -1,0 +1,19 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "ars-solartech-srm",
+  "main": "dist/worker.js",
+  "compatibility_date": "2026-11-19",
+  "assets": {
+    "directory": "./dist/public",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "ars-solartech-srm",
+      "database_id": "e7026a69-5d5c-4f77-bd54-669bad3a17e5"
+    }
+  ],
+  "observability": { "enabled": true }
+}

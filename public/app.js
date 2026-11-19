@@ -99,11 +99,69 @@ function apply(payload) {
   if (snap && snap.me) S.d = snap;
 }
 
-function showGate() {
+function showGate(mode = 'login') {
+  const setup = mode === 'setup';
   $('#gate').hidden = false;
   $('#shell').hidden = true;
+  const loginForm = $('#loginForm');
+  const setupForm = $('#setupForm');
+  if (loginForm) loginForm.hidden = setup;
+  if (setupForm) setupForm.hidden = !setup;
   closeModal();
   closeDrawer();
+}
+
+async function loadApp() {
+  try {
+    S.d = await api('/api/bootstrap');
+    render();
+  } catch (e) {
+    if (e.status === 401) showGate('login');
+    else toast(e.message || 'Could not load data', 'err');
+  }
+}
+
+function wireAuthForms() {
+  const loginForm = $('#loginForm');
+  if (loginForm) {
+    loginForm.addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      const btn = loginForm.querySelector('button[type=submit]');
+      const data = Object.fromEntries(new FormData(loginForm).entries());
+      btn.disabled = true;
+      try {
+        await api('/api/auth/login', 'POST', { email: data.email, password: data.password });
+        loginForm.reset();
+        await loadApp();
+        toast('Signed in', 'ok');
+      } catch (e) {
+        toast(e.message || 'Sign in failed', 'err');
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  }
+
+  const setupForm = $('#setupForm');
+  if (setupForm) {
+    setupForm.addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      const btn = setupForm.querySelector('button[type=submit]');
+      const data = Object.fromEntries(new FormData(setupForm).entries());
+      if (data.password !== data.password2) return toast('Passwords do not match', 'err');
+      btn.disabled = true;
+      try {
+        await api('/api/auth/setup', 'POST', { name: data.name, email: data.email, password: data.password });
+        setupForm.reset();
+        await loadApp();
+        toast('Owner account created', 'ok');
+      } catch (e) {
+        toast(e.message || 'Could not create the account', 'err');
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  }
 }
 
 /* ══════════════════════════════════════════════════════════════
@@ -598,9 +656,9 @@ function viewUsers() {
       <span class="hint">${users.length} account${users.length === 1 ? '' : 's'}</span>
     </div>
     <div class="grid cols-4">
-      <div><div class="k" style="font-size:11px;color:var(--dim);font-weight:700">1 · Sign in</div><p class="sub-line" style="margin-top:5px">They open the site and sign in with Freebuff.</p></div>
-      <div><div class="k" style="font-size:11px;color:var(--dim);font-weight:700">2 · Appears here</div><p class="sub-line" style="margin-top:5px">New accounts start as <strong>Viewer</strong> with no department.</p></div>
-      <div><div class="k" style="font-size:11px;color:var(--dim);font-weight:700">3 · Assign</div><p class="sub-line" style="margin-top:5px">Owner/admin sets department + role below.</p></div>
+      <div><div class="k" style="font-size:11px;color:var(--dim);font-weight:700">1 · Owner/admin adds them</div><p class="sub-line" style="margin-top:5px">Click <strong>Add user</strong> and set an email + temporary password.</p></div>
+      <div><div class="k" style="font-size:11px;color:var(--dim);font-weight:700">2 · They sign in</div><p class="sub-line" style="margin-top:5px">They open the site with that email and password.</p></div>
+      <div><div class="k" style="font-size:11px;color:var(--dim);font-weight:700">3 · Department + role</div><p class="sub-line" style="margin-top:5px">Set below — changes apply on their next click.</p></div>
       <div><div class="k" style="font-size:11px;color:var(--dim);font-weight:700">4 · Enforced</div><p class="sub-line" style="margin-top:5px">Server checks every action against the department.</p></div>
     </div>
   </div>
@@ -608,7 +666,10 @@ function viewUsers() {
   <div class="card">
     <div class="card-head">
       <h3>Accounts</h3>
-      <span class="hint">${owner ? 'Owner: ' + esc(owner.name || owner.email || owner.sub) : 'No owner yet'}</span>
+      <div class="inline">
+        <span class="hint">${owner ? 'Owner: ' + esc(owner.name || owner.email || owner.sub) : 'No owner yet'}</span>
+        ${canManage ? '<button class="btn primary small" data-act="add-user">+ Add user</button>' : ''}
+      </div>
     </div>
     <div class="table-wrap">
       <table>
@@ -633,7 +694,10 @@ function viewUsers() {
               </td>
               <td class="num">
                 ${canManage
-                  ? `<button class="btn small ${u.active ? 'ghost' : 'danger'}" data-act="toggle-user" data-id="${esc(u.sub)}" data-active="${u.active}">${u.active ? 'Enabled' : 'Disabled'}</button>`
+                  ? `<div class="inline" style="justify-content:flex-end">
+                       <button class="btn ghost small" data-act="reset-password" data-id="${esc(u.sub)}" data-name="${esc(u.name || u.email || '')}">Password</button>
+                       <button class="btn small ${u.active ? 'ghost' : 'danger'}" data-act="toggle-user" data-id="${esc(u.sub)}" data-active="${u.active}">${u.active ? 'Enabled' : 'Disabled'}</button>
+                     </div>`
                   : `<span class="badge ${u.active ? 'green' : 'grey'}">${u.active ? 'Enabled' : 'Disabled'}</span>`}
               </td>
             </tr>`).join('')}
@@ -868,6 +932,54 @@ function dispatchModal(orderId) {
       closeModal();
       render();
       toast('Dispatch saved', 'ok');
+    },
+  });
+}
+
+function addUserModal() {
+  const depts = S.d.meta.depts;
+  const body = `<div class="form-grid">
+    ${field('Full name', 'name', '')}
+    ${field('Email *', 'email', '', 'email', 'required')}
+    ${selectField('Role', 'role', 'viewer', S.d.meta.roles.map((r) => [r, roleLabel(r)]))}
+    ${selectField('Department', 'dept', '', [['', '— none —'], ...depts.map((d) => [d, d])])}
+    ${field('Temporary password *', 'password', '', 'password', 'required minlength="8"')}
+  </div>
+  <p class="sub-line" style="margin-top:10px">Share this password with them directly. They can change it from <strong>Your access</strong> after signing in.</p>`;
+
+  modal({
+    title: 'Add user',
+    sub: 'Only an owner or admin can create accounts.',
+    body,
+    submit: 'Create account',
+    wide: true,
+    async onSubmit(data) {
+      if (!data.email || !data.password) throw new Error('Email and password are required');
+      const res = await api('/api/users', 'POST', data);
+      apply(res);
+      closeModal();
+      render();
+      toast('Account created', 'ok');
+    },
+  });
+}
+
+function resetPasswordModal(sub, name) {
+  const body = `<div class="form-grid">
+    ${field('New password *', 'password', '', 'password', 'required minlength="8"')}
+  </div>`;
+  modal({
+    title: `Reset password — ${name}`,
+    sub: 'Tell them the new password; their existing sessions stay signed in.',
+    body,
+    submit: 'Set password',
+    async onSubmit(data) {
+      if (!data.password || data.password.length < 8) throw new Error('Password must be at least 8 characters');
+      const res = await api('/api/users/' + encodeURIComponent(sub), 'PATCH', { password: data.password });
+      apply(res);
+      closeModal();
+      render();
+      toast('Password updated', 'ok');
     },
   });
 }
@@ -1160,6 +1272,13 @@ const ACTIONS = {
       apply(res); render(); toast('Holiday removed', 'ok');
     } catch (e) { toast(e.message, 'err'); }
   },
+  'add-user': () => addUserModal(),
+  'reset-password': (el) => resetPasswordModal(el.dataset.id, el.dataset.name || 'user'),
+  signout: async () => {
+    try { await api('/api/auth/logout', 'POST'); } catch { /* ignore */ }
+    S.d = null;
+    location.reload();
+  },
   import: () => importModal(),
   export: () => { exportOrders(); exportDispatches(); },
 };
@@ -1230,14 +1349,14 @@ document.addEventListener('keydown', (ev) => {
 /* ── boot ──────────────────────────────────────────────────── */
 (async function boot() {
   routeFromHash();
+  wireAuthForms();
+  let needsSetup = false;
   try {
-    const data = await api('/api/bootstrap');
-    S.d = data;
-    render();
-  } catch (e) {
-    showGate();
-    if (e.status && e.status !== 401) {
-      toast(e.message || 'Could not load data', 'err');
-    }
+    needsSetup = !!(await api('/api/auth/state')).needsSetup;
+  } catch { /* fall through to the normal login flow */ }
+  if (needsSetup) {
+    showGate('setup');
+    return;
   }
+  await loadApp();
 })();

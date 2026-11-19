@@ -352,3 +352,8 @@ textarea { resize: vertical; min-height: 68px; }
   .cap-row { grid-template-columns: 92px 1fr 70px; }
   .cap-row .val.hide-sm { display: none; }
 }
+
+/* ── email + password gate ───────────────────────────────── */
+.gate-form { display: grid; gap: 11px; margin: 22px 0 4px; }
+.gate-form .btn.large { width: 100%; margin-top: 4px; }
+.gate-form .fine { margin-top: 8px; }

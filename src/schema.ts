@@ -5,7 +5,12 @@ const DDL: string[] = [
   `CREATE TABLE IF NOT EXISTS users (
     sub TEXT PRIMARY KEY, email TEXT, name TEXT, dept TEXT,
     role TEXT NOT NULL DEFAULT 'viewer', active INTEGER NOT NULL DEFAULT 1,
+    pass_hash TEXT,
     created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS sessions (
+    token_hash TEXT PRIMARY KEY, sub TEXT NOT NULL,
+    created_at TEXT NOT NULL, expires_at TEXT NOT NULL
   )`,
   `CREATE TABLE IF NOT EXISTS settings (
     id INTEGER PRIMARY KEY CHECK (id = 1), json TEXT NOT NULL,
@@ -48,20 +53,32 @@ const DDL: string[] = [
   `CREATE INDEX IF NOT EXISTS idx_stage_order ON order_stages(order_id)`,
   `CREATE INDEX IF NOT EXISTS idx_disp_order ON dispatches(order_id)`,
   `CREATE INDEX IF NOT EXISTS idx_events_at ON events(at DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)`,
+  `CREATE INDEX IF NOT EXISTS idx_sessions_sub ON sessions(sub)`,
 ];
+
+// Columns added after the first release. SQLite has no ADD COLUMN IF NOT EXISTS,
+// so each one is applied on its own and treated as done when it already exists.
+const ALTERS: string[] = [`ALTER TABLE users ADD COLUMN pass_hash TEXT`];
 
 let ready: Promise<void> | null = null;
 
 /** Creates the schema once per isolate; resolves immediately afterwards. */
 export function ensureSchema(db: D1Database): Promise<void> {
   if (!ready) {
-    ready = db
-      .batch(DDL.map((sql) => db.prepare(sql)))
-      .then(() => undefined)
-      .catch((err) => {
-        ready = null; // let a later request retry instead of caching the failure
-        throw err;
-      });
+    ready = (async () => {
+      await db.batch(DDL.map((sql) => db.prepare(sql)));
+      for (const sql of ALTERS) {
+        try {
+          await db.prepare(sql).run();
+        } catch {
+          /* column already present on an older database */
+        }
+      }
+    })().catch((err) => {
+      ready = null; // let a later request retry instead of caching the failure
+      throw err;
+    });
   }
   return ready;
 }

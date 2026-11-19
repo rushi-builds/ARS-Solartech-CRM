@@ -6,10 +6,10 @@
   "scripts": {
     "build": "node build.mjs",
     "dev": "wrangler dev --config wrangler.dev.jsonc --port 8787",
-    "db:local": "wrangler d1 execute DB --local --config wrangler.dev.jsonc --file=schema.sql"
+    "db:local": "wrangler d1 execute DB --local --config wrangler.dev.jsonc --file=schema.sql",
+    "deploy": "npm run build && wrangler deploy"
   },
   "dependencies": {
-    "@freebuff/auth": "^0.1.0",
     "hono": "^4.13.19"
   },
   "devDependencies": {

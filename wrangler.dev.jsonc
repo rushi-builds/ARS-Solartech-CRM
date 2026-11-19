@@ -17,8 +17,6 @@
     }
   ],
   "vars": {
-    "FREEBUFF_CLIENT_ID": "415fdf9a-339a-4440-8136-cfdb22f907d2",
-    "FREEBUFF_ISSUER": "https://freebuff.com/oidc",
     "APP_ORIGIN": "http://localhost:8787"
   }
 }

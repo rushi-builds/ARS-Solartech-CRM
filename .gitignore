@@ -5,3 +5,6 @@ dev.log
 .env
 .dev.vars
 .DS_Store
+deploy.log
+.wrangler/test2
+.tmp-test

@@ -20,13 +20,41 @@
         <p>Solartech operations control room</p>
       </div>
     </div>
+
+    <form id="loginForm" class="gate-form" autocomplete="on">
+      <label class="field"><span>Email</span>
+        <input name="email" type="email" autocomplete="username" required placeholder="you@arsolartech.com" />
+      </label>
+      <label class="field"><span>Password</span>
+        <input name="password" type="password" autocomplete="current-password" required placeholder="••••••••" />
+      </label>
+      <button class="btn primary large" type="submit">Sign in</button>
+      <p class="fine" id="loginHint">Accounts are created by an owner or admin. Lost your password? Ask them to reset it.</p>
+    </form>
+
+    <form id="setupForm" class="gate-form" autocomplete="off" hidden>
+      <p class="fine">First run — create the owner account for this workspace.</p>
+      <label class="field"><span>Your name</span>
+        <input name="name" type="text" autocomplete="name" placeholder="Rushikesh Dhumal" />
+      </label>
+      <label class="field"><span>Email</span>
+        <input name="email" type="email" autocomplete="username" required placeholder="you@arsolartech.com" />
+      </label>
+      <label class="field"><span>Password (min 8 characters)</span>
+        <input name="password" type="password" autocomplete="new-password" required minlength="8" />
+      </label>
+      <label class="field"><span>Repeat password</span>
+        <input name="password2" type="password" autocomplete="new-password" required minlength="8" />
+      </label>
+      <button class="btn primary large" type="submit">Create owner account</button>
+      <p class="fine">This account gets full control: settings, users and every department.</p>
+    </form>
+
     <ul class="gate-points">
       <li>Live order pipeline across design, purchase, production, QC and dispatch</li>
       <li>Working-day forecasts, buffer alerts and plant capacity load</li>
       <li>Department-wise access — every action is checked on the server</li>
     </ul>
-    <a class="btn primary large" href="/auth/freebuff/signin?returnTo=/">Sign in with Freebuff</a>
-    <p class="fine">Access is invite-only. The first account to sign in becomes the owner and approves everyone else.</p>
   </div>
 </div>
 
@@ -51,9 +79,7 @@
           <small id="whoRole">—</small>
         </div>
       </div>
-      <form method="post" action="/auth/freebuff/signout">
-        <button class="btn ghost small" type="submit">Sign out</button>
-      </form>
+      <button class="btn ghost small" data-act="signout" type="button">Sign out</button>
     </div>
   </aside>
 

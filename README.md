@@ -15,15 +15,32 @@ schema.sql         D1 schema (same tables, for manual/local runs)
 build.mjs          esbuild bundle + Sites deploy manifest
 ```
 
-## Live URLs
+## Live deployment
 
-| Environment | URL |
+| What | Value |
 | --- | --- |
-| Production | https://ars-order-to-dispatch-3qnck5.freebuff.site |
-| Preview | https://ars-order-to-dispatch-3qnck5-preview.freebuff.site |
+| Worker | `ars-solartech-srm` (Cloudflare account `Ktmenergyexperts`) |
+| URL | https://ars-solartech-srm.ktmenergyexperts.workers.dev |
+| Database | D1 `ars-solartech-srm` (`DB` binding) |
 
-Both environments have their own D1 database. Tables are created by the Worker
-on its first request (`src/schema.ts`), so a fresh database needs no manual step.
+Both this and any other environment keep their own D1 database. Tables are
+created by the Worker on its first request (`src/schema.ts`), so a fresh
+database needs no manual step.
+
+## Accounts and sign-in
+
+Sign-in is email + password, handled entirely by this Worker — no third-party
+identity provider, so it runs in any Cloudflare account.
+
+* Passwords: PBKDF2-SHA256, 150k iterations, per-user random salt.
+* Sessions: random 256-bit token, stored SHA-256 hashed in `sessions`, sent as
+  an `HttpOnly; SameSite=Lax` cookie (Secure on HTTPS), 30-day expiry.
+* **First visit** on an empty database shows *Create owner account*; that account
+  becomes the owner. Every later account is created from **Users & roles → Add
+  user** with a temporary password, which the person can change from **Your
+  access** after signing in.
+* Every state-changing request must come from the site's own origin; everything
+  under `/api/*` is `private, no-store`.
 
 ## What the planner does
 
@@ -40,13 +57,13 @@ on its first request (`src/schema.ts`), so a fresh database needs no manual step
 
 | Role | Can do |
 | --- | --- |
-| Owner / Admin | everything, including settings and user approval |
+| Owner / Admin | everything, including settings and creating users |
 | Editor | only the stages of their department (design, purchase, production, QC, dispatch, orders) |
 | Viewer | read only |
 
 Every check happens in the Worker. The UI only greys out what the server would
-refuse anyway. The first account to sign in becomes the owner; everyone else
-lands as a viewer until the owner assigns a department and role on **Users & roles**.
+refuse anyway. The first account created becomes the owner; every other account
+starts with the role and department the owner picks on **Users & roles**.
 
 ## Local development
 
@@ -56,28 +73,25 @@ npm run db:local     # create the local D1 tables
 npm run dev          # http://localhost:8787
 ```
 
-`wrangler.dev.jsonc` carries the development Freebuff client ID and
-`APP_ORIGIN=http://localhost:8787`. Sign-in opens Freebuff and returns to
-`/auth/freebuff/callback`.
+`wrangler.dev.jsonc` runs the same code against a local D1 database; the first
+visit on `http://localhost:8787` asks you to create the owner account.
 
-## Deploy (Cloudflare)
-
-Freebuff Sites injects `FREEBUFF_CLIENT_ID`, `FREEBUFF_ISSUER` and `APP_ORIGIN`
-and binds `DB`; `npm run build` writes `dist/manifest.json`, then deploy the
-`dist` folder with the Sites deployer.
-
-For a plain Cloudflare account instead:
+## Deploy to your own Cloudflare account
 
 ```bash
-npx wrangler d1 create ars-oms          # copy the database_id
-npx wrangler d1 execute ars-oms --remote --file=schema.sql
-# set DB, FREEBUFF_CLIENT_ID (production client for your exact origin),
-# FREEBUFF_ISSUER and APP_ORIGIN in wrangler.jsonc, then:
-npm run build && npx wrangler deploy
+npx wrangler login                      # once per machine
+npx wrangler d1 create ars-solartech-srm   # prints database_id
+# put that id in wrangler.jsonc under d1_databases[0].database_id
+npm run deploy                          # build + wrangler deploy
 ```
 
-Register the production redirect URI `https://<your-domain>/auth/freebuff/callback`
-before going live.
+The Worker URL is printed at the end (`https://<worker>.<account>.workers.dev`).
+The D1 tables are created on the first request — nothing to run by hand.
+`APP_ORIGIN` is optional: when it is not set, the Worker derives the origin from
+the request (set it only if you serve the app from several hostnames).
+
+Custom domain: Workers & Pages → `ars-solartech-srm` → Settings → Domains &
+Routes → Add custom domain.
 
 ## Importing orders
 

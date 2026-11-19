@@ -8,8 +8,16 @@ CREATE TABLE IF NOT EXISTS users (
   dept        TEXT,
   role        TEXT NOT NULL DEFAULT 'viewer',   -- owner | admin | editor | viewer
   active      INTEGER NOT NULL DEFAULT 1,
+  pass_hash   TEXT,                             -- pbkdf2$iterations$salt$hash
   created_at  TEXT NOT NULL,
   updated_at  TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+  token_hash  TEXT PRIMARY KEY,
+  sub         TEXT NOT NULL,
+  created_at  TEXT NOT NULL,
+  expires_at  TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS settings (

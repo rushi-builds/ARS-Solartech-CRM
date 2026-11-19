@@ -84,10 +84,74 @@ export async function getUser(db: D1Database, sub: string): Promise<User | null>
   return await db.prepare('SELECT sub, email, name, dept, role, active FROM users WHERE sub = ?').bind(sub).first<User>();
 }
 
+export type AuthRow = User & { pass_hash: string | null };
+
+/** Looks up a login row by email (case-insensitive). */
+export async function findUserByEmail(db: D1Database, email: string): Promise<AuthRow | null> {
+  return await db
+    .prepare('SELECT sub, email, name, dept, role, active, pass_hash FROM users WHERE lower(email) = lower(?)')
+    .bind(email)
+    .first<AuthRow>();
+}
+
+/** True when nobody has been created yet, i.e. the first-run setup screen. */
+export async function noUsersYet(db: D1Database): Promise<boolean> {
+  const row = await db.prepare('SELECT COUNT(*) AS n FROM users').first<{ n: number }>();
+  return (row?.n || 0) === 0;
+}
+
+export async function createUser(
+  db: D1Database,
+  u: { sub: string; email: string; name: string | null; dept: string | null; role: Role; passHash: string },
+): Promise<User> {
+  const at = nowISO();
+  await db
+    .prepare(
+      `INSERT INTO users (sub, email, name, dept, role, active, pass_hash, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)`,
+    )
+    .bind(u.sub, u.email, u.name, u.dept, u.role, u.passHash, at, at)
+    .run();
+  return { sub: u.sub, email: u.email, name: u.name, dept: u.dept, role: u.role, active: 1 };
+}
+
+export async function setPassword(db: D1Database, sub: string, passHash: string): Promise<void> {
+  await db.prepare('UPDATE users SET pass_hash = ?, updated_at = ? WHERE sub = ?').bind(passHash, nowISO(), sub).run();
+}
+
+// ---------------- sessions ----------------
+export async function createSession(db: D1Database, sub: string, tokenHash: string, expiresAt: string) {
+  await db
+    .prepare('INSERT INTO sessions (token_hash, sub, created_at, expires_at) VALUES (?, ?, ?, ?)')
+    .bind(tokenHash, sub, nowISO(), expiresAt)
+    .run();
+}
+
+/** Session user, or null when the token is unknown/expired/disabled. */
+export async function sessionUser(db: D1Database, tokenHash: string): Promise<User | null> {
+  const row = await db
+    .prepare(
+      `SELECT u.sub, u.email, u.name, u.dept, u.role, u.active
+         FROM sessions s JOIN users u ON u.sub = s.sub
+        WHERE s.token_hash = ? AND s.expires_at > ?`,
+    )
+    .bind(tokenHash, nowISO())
+    .first<User>();
+  if (!row || !row.active) return null;
+  return row;
+}
+
+export async function deleteSession(db: D1Database, tokenHash: string) {
+  await db.prepare('DELETE FROM sessions WHERE token_hash = ?').bind(tokenHash).run();
+}
+
+export async function purgeSessions(db: D1Database) {
+  await db.prepare('DELETE FROM sessions WHERE expires_at <= ?').bind(nowISO()).run();
+}
+
 /**
- * Called on every signed-in request. Creates the user row on first sign-in.
- * The very first user becomes owner; everyone else starts as viewer until an
- * admin assigns a department + role.
+ * Legacy Freebuff sign-in helper, kept for the old rows: the very first account
+ * becomes owner, everyone else starts as viewer until an admin assigns a role.
  */
 export async function ensureUser(
   db: D1Database,

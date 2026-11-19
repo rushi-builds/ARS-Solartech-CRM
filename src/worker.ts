@@ -1,13 +1,21 @@
 // ARS Solartech - Order to Dispatch Management System
 // Cloudflare Worker: Sign in with Freebuff + role-based API + static SPA.
 import { Hono } from 'hono';
-import {
-  createFreebuffAuth,
-  isSameOriginRequest,
-  type FreebuffAuth,
-} from '@freebuff/auth';
 
 import { ensureSchema } from './schema';
+import {
+  clearSessionCookie,
+  hashPassword,
+  newSessionToken,
+  passwordProblem,
+  readSessionToken,
+  sameOrigin,
+  sessionCookie,
+  sessionExpiry,
+  sha256,
+  validEmail,
+  verifyPassword,
+} from './auth';
 import {
   DEFAULT_SETTINGS,
   DEPTS,
@@ -25,6 +33,14 @@ import {
   deleteOrder,
   enrich,
   ensureUser,
+  createSession,
+  createUser,
+  deleteSession,
+  findUserByEmail,
+  noUsersYet,
+  purgeSessions,
+  sessionUser,
+  setPassword,
   getSettings,
   listDispatchRows,
   listEvents,
@@ -48,35 +64,18 @@ import {
 export interface Env {
   ASSETS: { fetch(request: Request): Promise<Response> };
   DB: D1Database;
-  FREEBUFF_CLIENT_ID: string;
-  FREEBUFF_ISSUER?: string;
-  APP_ORIGIN: string;
+  APP_ORIGIN?: string;
 }
 
 type Ctx = { Bindings: Env; Variables: { user: User } };
 
 const ROLES: Role[] = ['owner', 'admin', 'editor', 'viewer'];
 
-// One auth instance per isolate (per client/origin pair), so discovery and the
-// signing keys are cached instead of fetched on every request.
-const authCache = new Map<string, FreebuffAuth>();
-function authFor(env: Env): FreebuffAuth {
-  const key = `${env.FREEBUFF_CLIENT_ID}|${env.APP_ORIGIN}|${env.FREEBUFF_ISSUER || ''}`;
-  let a = authCache.get(key);
-  if (!a) {
-    const local = /^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/.test(env.APP_ORIGIN);
-    a = createFreebuffAuth({
-      clientId: env.FREEBUFF_CLIENT_ID,
-      baseUrl: env.APP_ORIGIN,
-      issuer: env.FREEBUFF_ISSUER,
-      allowInsecureLocalhost: local,
-    });
-    authCache.set(key, a);
-  }
-  return a;
-}
-
 const app = new Hono<Ctx>();
+
+// APP_ORIGIN is set on managed hosting; a plain Cloudflare deploy derives it
+// from the request so cookies and the origin guard still work out of the box.
+const siteOrigin = (c: any): string => c.env.APP_ORIGIN || new URL(c.req.url).origin;
 
 // Public readiness probe (registered before the auth guard on purpose).
 // Also runs the idempotent schema bootstrap so a fresh deployment is usable.
@@ -89,15 +88,82 @@ app.get('/healthz', async (c) => {
   }
 });
 
+// ---------------------------------------------------------------- auth (public)
+async function startSession(c: any, user: User) {
+  const { token, tokenHash } = await newSessionToken();
+  await createSession(c.env.DB, user.sub, tokenHash, sessionExpiry());
+  c.header('Set-Cookie', sessionCookie(token, siteOrigin(c)));
+}
+
+// Tells the login page whether it should show "create the owner account".
+app.get('/api/auth/state', async (c) => {
+  await ensureSchema(c.env.DB);
+  return c.json({ needsSetup: await noUsersYet(c.env.DB) });
+});
+
+// First run: the very first account becomes the owner.
+app.post('/api/auth/setup', async (c) => {
+  await ensureSchema(c.env.DB);
+  if (!sameOrigin(c.req.raw, siteOrigin(c))) return c.json({ error: 'bad_origin' }, 403);
+  if (!(await noUsersYet(c.env.DB))) {
+    return c.json({ error: 'setup_closed', message: 'An owner account already exists. Ask them for an account.' }, 403);
+  }
+  const body = await c.req.json().catch(() => ({}));
+  const email = validEmail(body.email);
+  if (!email) return c.json({ error: 'bad_email', message: 'Enter a valid email address' }, 400);
+  const problem = passwordProblem(body.password);
+  if (problem) return c.json({ error: 'weak_password', message: problem }, 400);
+  const name = str(body.name, 80) || email.split('@')[0];
+  const user = await createUser(c.env.DB, {
+    sub: crypto.randomUUID(),
+    email,
+    name,
+    dept: null,
+    role: 'owner',
+    passHash: await hashPassword(String(body.password)),
+  });
+  await logEvent(c.env.DB, { sub: user.sub, name: user.name }, 'user', user.sub, 'create',
+    `Owner account ${email} created`);
+  await startSession(c, user);
+  return c.json({ ok: true, me: user });
+});
+
+app.post('/api/auth/login', async (c) => {
+  await ensureSchema(c.env.DB);
+  if (!sameOrigin(c.req.raw, siteOrigin(c))) return c.json({ error: 'bad_origin' }, 403);
+  const body = await c.req.json().catch(() => ({}));
+  const email = validEmail(body.email);
+  const password = String(body.password ?? '');
+  if (!email || !password) return c.json({ error: 'bad_credentials', message: 'Email and password are required' }, 400);
+
+  const row = await findUserByEmail(c.env.DB, email);
+  const ok = row ? await verifyPassword(password, row.pass_hash) : false;
+  if (!row || !ok) return c.json({ error: 'bad_credentials', message: 'Wrong email or password' }, 401);
+  if (!row.active) return c.json({ error: 'account_disabled', message: 'This account is disabled' }, 403);
+
+  await purgeSessions(c.env.DB);
+  const user: User = { sub: row.sub, email: row.email, name: row.name, dept: row.dept, role: row.role, active: row.active };
+  await startSession(c, user);
+  await logEvent(c.env.DB, { sub: user.sub, name: user.name }, 'user', user.sub, 'signin',
+    `${user.name || email} signed in`);
+  return c.json({ ok: true, me: user });
+});
+
+app.post('/api/auth/logout', async (c) => {
+  const token = readSessionToken(c.req.raw);
+  if (token) await deleteSession(c.env.DB, await sha256(token));
+  c.header('Set-Cookie', clearSessionCookie(siteOrigin(c)));
+  return c.json({ ok: true });
+});
+
 // ---------------------------------------------------------------- auth guard
 app.use('/api/*', async (c, next) => {
   c.header('Cache-Control', 'private, no-store');
   await ensureSchema(c.env.DB);
-  const fb = await authFor(c.env).getUser(c.req.raw);
-  if (!fb) return c.json({ error: 'signin_required', message: 'Sign in required' }, 401);
 
-  const user = await ensureUser(c.env.DB, fb.sub, fb.email ?? null, fb.name ?? null);
-  if (!user.active) return c.json({ error: 'account_disabled', message: 'This account is disabled' }, 403);
+  const token = readSessionToken(c.req.raw);
+  const user = token ? await sessionUser(c.env.DB, await sha256(token)) : null;
+  if (!user) return c.json({ error: 'signin_required', message: 'Sign in required' }, 401);
   c.set('user', user);
   await next();
 });
@@ -105,7 +171,7 @@ app.use('/api/*', async (c, next) => {
 // Every state change must come from this site's own pages.
 app.use('/api/*', async (c, next) => {
   if (c.req.method !== 'GET' && c.req.method !== 'HEAD') {
-    if (!isSameOriginRequest(c.req.raw, c.env.APP_ORIGIN)) {
+    if (!sameOrigin(c.req.raw, siteOrigin(c))) {
       return c.json({ error: 'bad_origin' }, 403);
     }
   }
@@ -381,6 +447,34 @@ app.put('/api/stakeholders', async (c) => {
 });
 
 // ---------------------------------------------------------------- users
+app.post('/api/users', async (c) => {
+  const denied = guard(c, 'users');
+  if (denied) return denied;
+  const body = await c.req.json().catch(() => ({}));
+  const email = validEmail(body.email);
+  if (!email) return c.json({ error: 'bad_email', message: 'Enter a valid email address' }, 400);
+  const problem = passwordProblem(body.password);
+  if (problem) return c.json({ error: 'weak_password', message: problem }, 400);
+  if (await findUserByEmail(c.env.DB, email)) {
+    return c.json({ error: 'email_taken', message: `${email} already has an account` }, 409);
+  }
+  const role: Role = ROLES.includes(body.role) ? body.role : 'viewer';
+  const dept = body.dept && DEPTS.includes(body.dept) ? body.dept : null;
+  const name = str(body.name, 80) || email.split('@')[0];
+  const me: User = c.get('user');
+  const user = await createUser(c.env.DB, {
+    sub: crypto.randomUUID(),
+    email,
+    name,
+    dept,
+    role,
+    passHash: await hashPassword(String(body.password)),
+  });
+  await logEvent(c.env.DB, { sub: me.sub, name: me.name }, 'user', user.sub, 'create',
+    `${name} added as ${role}${dept ? ' · ' + dept : ''}`);
+  return c.json({ ok: true, user, snapshot: await snapshot(c) });
+});
+
 app.patch('/api/users/:sub', async (c) => {
   const denied = guard(c, 'users');
   if (denied) return denied;
@@ -403,9 +497,31 @@ app.patch('/api/users/:sub', async (c) => {
   }
 
   await updateUser(c.env.DB, sub, { role, dept, active });
+  if (typeof body.password === 'string' && body.password) {
+    const problem = passwordProblem(body.password);
+    if (problem) return c.json({ error: 'weak_password', message: problem }, 400);
+    await setPassword(c.env.DB, sub, await hashPassword(body.password));
+    await logEvent(c.env.DB, { sub: me.sub, name: me.name }, 'user', sub, 'password',
+      `Password reset for ${target.name || target.email || sub}`);
+  }
   await logEvent(c.env.DB, { sub: me.sub, name: me.name }, 'user', sub, 'update',
     `${target.name || target.email || sub}: role=${role ?? target.role}, dept=${dept ?? '-'}, active=${active ?? target.active}`);
   return c.json({ ok: true, snapshot: await snapshot(c) });
+});
+
+// ---------------------------------------------------------------- self password
+app.post('/api/auth/password', async (c) => {
+  const me: User = c.get('user');
+  const body = await c.req.json().catch(() => ({}));
+  const row = await findUserByEmail(c.env.DB, me.email || '');
+  if (!row || !(await verifyPassword(String(body.current ?? ''), row.pass_hash))) {
+    return c.json({ error: 'bad_password', message: 'Current password is wrong' }, 400);
+  }
+  const problem = passwordProblem(body.next);
+  if (problem) return c.json({ error: 'weak_password', message: problem }, 400);
+  await setPassword(c.env.DB, me.sub, await hashPassword(String(body.next)));
+  await logEvent(c.env.DB, { sub: me.sub, name: me.name }, 'user', me.sub, 'password', 'Password changed');
+  return c.json({ ok: true });
 });
 
 // ---------------------------------------------------------------- bulk import
@@ -468,7 +584,6 @@ app.all('*', (c) => c.env.ASSETS.fetch(c.req.raw));
 
 export default {
   fetch(request: Request, env: Env): Promise<Response> {
-    // wrap() serves /auth/freebuff/* and keeps the session cookie fresh.
-    return authFor(env).wrap((req: Request, e: Env) => app.fetch(req, e))(request, env);
+    return app.fetch(request, env);
   },
 };
