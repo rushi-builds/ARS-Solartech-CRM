@@ -45,13 +45,27 @@ export type Action =
   | 'order' | 'ovr' | 'settings' | 'users' | 'delete' | 'approve'
   | 'des' | 'apr' | 'mat' | 'ps' | 'pf' | 'qc' | 'dsp' | 'disp';
 
+/** The department whose members open the advanced backend Settings. */
+export const SUPER_ADMIN_DEPT = 'Super Admin';
+
+/**
+ * True for the department super admin: either the department is named
+ * "Super Admin" (typed as a custom department or picked from the list), or an
+ * Admin ticked the extra flag on the account.
+ */
+export function isDeptSuperAdmin(u: { dept?: string | null; dept_admin?: number } | null): boolean {
+  if (!u) return false;
+  if (u.dept_admin) return true;
+  return /^super[\s_-]*admin$/i.test(String(u.dept || '').trim());
+}
+
 export function can(u: User | null, action: Action, access?: AccessMap): boolean {
   if (!u || !u.active) return false;
   // The owner is never limited, whatever the matrix says.
   if (u.role === 'owner') return true;
-  // A department super admin, appointed by an Admin, opens the advanced
-  // backend settings (planning, working days, alerts, access matrix).
-  if (u.dept_admin && action === 'settings') return true;
+  // A department super admin opens the advanced backend settings (planning,
+  // working days, teams, alerts and the access matrix).
+  if (isDeptSuperAdmin(u) && action === 'settings') return true;
   const map = access || DEFAULT_ACCESS;
   const preset = map[u.role];
   if (preset) return preset.includes(action);

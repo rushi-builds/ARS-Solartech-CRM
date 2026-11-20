@@ -94,7 +94,7 @@ const VIEWS = {
   dispatch: { title: 'Dispatch log', sub: 'Batches, vehicles, invoices and e-way bills', icon: 'truck' },
   capacity: { title: 'Capacity plan', sub: 'Working-day load against plant capacity', icon: 'chart' },
   users: { title: 'Users & roles', sub: 'Who can see what, and who can change it', icon: 'users' },
-  settings: { title: 'Settings', sub: 'Durations, capacity, working days and department heads', icon: 'gear' },
+  settings: { title: 'Settings', sub: 'Advanced backend settings — planning, access control, alerts and teams', icon: 'gear' },
   activity: { title: 'Activity', sub: 'Every change, who made it and when', icon: 'clock' },
 };
 
@@ -424,6 +424,12 @@ function roleLabel(role) {
    so the two rows stay distinguishable while every label still reads Admin. */
 function roleOptionLabel(role) {
   return role === 'owner' ? 'Owner · Admin' : roleLabel(role);
+}
+
+/* Department "Super Admin" (preset or typed by hand) opens advanced Settings. */
+const SUPER_ADMIN_DEPT = /^super[\s_-]*admin$/i;
+function isDeptSuper(u) {
+  return !!(u && (u.dept_admin || SUPER_ADMIN_DEPT.test(String(u.dept || '').trim())));
 }
 
 function greeting() {
@@ -1085,7 +1091,7 @@ function viewUsers() {
                 <div class="who">
                   <span class="team-ava">${esc(initials(u.name, u.email))}</span>
                   <span>
-                    <span class="cust">${esc(u.name || 'Unnamed')}${u.sub === S.d.me.sub ? ' <span class="badge blue">you</span>' : ''}${u.dept_admin ? ' <span class="badge amber">Dept super admin</span>' : ''}</span>
+                    <span class="cust">${esc(u.name || 'Unnamed')}${u.sub === S.d.me.sub ? ' <span class="badge blue">you</span>' : ''}${isDeptSuper(u) ? ' <span class="badge amber">Dept super admin</span>' : ''}</span>
                     <small class="sub-line">${esc(u.email || 'no email on account')}${u.phone ? ' · ' + esc(u.phone) : ''}</small>
                   </span>
                 </div>
@@ -1108,7 +1114,9 @@ function viewUsers() {
               <td class="num">
                 ${canManage
                   ? `<div class="inline" style="justify-content:flex-end">
-                       <button class="btn ghost small" data-act="toggle-dept-admin" data-id="${esc(u.sub)}" data-active="${u.dept_admin ? 1 : 0}" ${u.dept ? '' : 'disabled title="Set a department first"'}>${u.dept_admin ? 'Remove dept admin' : 'Dept super admin'}</button>
+                       ${u.dept_admin || !SUPER_ADMIN_DEPT.test(String(u.dept || '').trim())
+                         ? `<button class="btn ghost small" data-act="toggle-dept-admin" data-id="${esc(u.sub)}" data-active="${u.dept_admin ? 1 : 0}" ${u.dept ? '' : 'disabled title="Set a department first"'}>${u.dept_admin ? 'Remove dept admin' : 'Dept super admin'}</button>`
+                         : '<span class="sub-line" title="Advanced Settings is on because the department is Super Admin">Super Admin dept</span>'}
                        <button class="btn ghost small" data-act="reset-password" data-id="${esc(u.sub)}" data-name="${esc(u.name || u.email || '')}">Password</button>
                        <button class="btn small ${u.active ? 'ghost' : 'danger'}" data-act="toggle-user" data-id="${esc(u.sub)}" data-active="${u.active}">${u.active ? 'Disable' : 'Enable'}</button>
                      </div>`
@@ -1478,9 +1486,10 @@ function addUserModal() {
       </select>
     </label>
     <label class="field" data-custom-for="dept" hidden><span>Custom department name</span>
-      <input name="dept_custom" autocomplete="off" placeholder="e.g. Fabrication" />
+      <input name="dept_custom" autocomplete="off" placeholder="e.g. Super Admin" />
     </label>
-    <label class="check wide"><input type="checkbox" name="dept_admin" value="1" /> Department super admin — opens the advanced Settings page for this department</label>
+    <p class="sub-line wide" style="margin:0">Department <strong>Super Admin</strong> (preset or custom) opens the advanced Settings page — Access control, planning, alerts and teams.</p>
+    <label class="check wide"><input type="checkbox" name="dept_admin" value="1" /> Also mark as department super admin (optional)</label>
     ${field('Temporary password *', 'password', '', 'password', 'required minlength="8"')}
   </div>
   <p class="sub-line" style="margin-top:10px">Share this password with them directly. They can change it from <strong>Your access</strong> after signing in.</p>`;
@@ -1546,7 +1555,7 @@ function customDeptModal(sub, name, current) {
       <input name="dept" value="${esc(current)}" autocomplete="off" placeholder="e.g. Fabrication" required />
     </label>
   </div>
-  <p class="sub-line" style="margin-top:10px">Type any department name — it is saved as written and appears in every department list. Access covers the department's stages and dispatch log.</p>`;
+  <p class="sub-line" style="margin-top:10px">Type any department name — it is saved as written and appears in every department list. Name it <strong>Super Admin</strong> to open the advanced Settings page (Access control, planning, alerts and teams) for this account.</p>`;
 
   modal({
     title: `Department — ${name || 'user'}`,

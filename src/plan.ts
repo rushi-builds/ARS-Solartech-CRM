@@ -70,6 +70,7 @@ export const NUMBERED_STAGES = [
 ];
 
 export const DEPTS = [
+  'Super Admin',
   'Sales / Coordination',
   'Design',
   'Production Planning',
