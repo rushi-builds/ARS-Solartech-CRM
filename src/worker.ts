@@ -98,7 +98,9 @@ function roleValue(v: unknown): Role | null {
   const s = str(v, 40);
   if (!s) return null;
   const low = s.toLowerCase();
-  if (low === 'owner') return null;
+  // Owner is assignable too: an Admin can hand another account the same
+  // full control, and the last owner can never be demoted.
+  if (low === 'owner') return 'owner';
   if (low === 'admin' || low === 'manager' || low === 'editor' || low === 'viewer') return low;
   return /^[A-Za-z][A-Za-z0-9 &/._-]{0,39}$/.test(s) ? s : null;
 }

@@ -410,6 +410,12 @@ function roleLabel(role) {
   return ({ owner: 'Admin', admin: 'Admin', manager: 'Manager', editor: 'Editor', viewer: 'Viewer' })[role] || role || 'Viewer';
 }
 
+/* Owner and Admin are the same full control; the dropdown says "Owner · Admin"
+   so the two rows stay distinguishable while every label still reads Admin. */
+function roleOptionLabel(role) {
+  return role === 'owner' ? 'Owner · Admin' : roleLabel(role);
+}
+
 function greeting() {
   const me = (S.d && S.d.me) || {};
   const first = String(me.name || me.email || '').split(/[\s@.]/).filter(Boolean)[0] || 'there';
@@ -949,7 +955,7 @@ function viewUsers() {
   const canManage = cap('users');
   const depts = S.d.meta.depts;
   const owner = users.find((u) => u.role === 'owner');
-  const presets = ['admin', 'manager', 'editor', 'viewer'];
+  const presets = ['owner', 'admin', 'manager', 'editor', 'viewer'];
   const customs = [...new Set(users.map((u) => u.role))]
     .filter((r) => r && r !== 'owner' && !presets.includes(r));
   const reqs = S.d.accessRequests || [];
@@ -974,8 +980,8 @@ function viewUsers() {
   const roleList = (current) => {
     const list = presets.slice();
     for (const r of customs) if (!list.includes(r)) list.push(r);
-    if (current && current !== 'owner' && !list.includes(current)) list.push(current);
-    return list.map((r) => `<option value="${esc(r)}" ${r === current ? 'selected' : ''}>${esc(roleLabel(r))}</option>`).join('')
+    if (current && !list.includes(current)) list.push(current);
+    return list.map((r) => `<option value="${esc(r)}" ${r === current ? 'selected' : ''}>${esc(roleOptionLabel(r))}</option>`).join('')
       + '<option value="__custom__">+ Custom role…</option>';
   };
 
@@ -1032,7 +1038,6 @@ function viewUsers() {
         <thead><tr><th>Person</th><th>Department</th><th>Role</th><th>Status</th><th class="num">Actions</th></tr></thead>
         <tbody>
           ${users.map((u) => {
-            const isOwner = u.role === 'owner';
             return `<tr>
               <td>
                 <div class="who">
@@ -1051,10 +1056,8 @@ function viewUsers() {
                 </select>
               </td>
               <td>
-                ${isOwner
+                ${(u.email || '').toLowerCase() === SUPER_ADMIN_EMAIL
                   ? '<span class="badge amber">Admin</span>'
-                  : (u.email || '').toLowerCase() === SUPER_ADMIN_EMAIL
-                    ? '<span class="badge amber">Admin</span>'
                   : `<select class="role-input" data-user-role="${esc(u.sub)}" data-current="${esc(u.role)}" ${canManage ? '' : 'disabled'}>
                        ${roleList(u.role)}
                      </select>`}
@@ -1320,9 +1323,9 @@ function dispatchModal(orderId) {
 }
 
 function roleChoices(current) {
-  const list = ['admin', 'manager', 'editor', 'viewer'];
+  const list = ['owner', 'admin', 'manager', 'editor', 'viewer'];
   for (const r of S.d.meta.customRoles || []) if (!list.includes(r)) list.push(r);
-  for (const u of S.d.users || []) if (u.role && !list.includes(u.role) && u.role !== 'owner') list.push(u.role);
+  for (const u of S.d.users || []) if (u.role && !list.includes(u.role)) list.push(u.role);
   if (current && !list.includes(current)) list.push(current);
   return list;
 }
@@ -1339,7 +1342,7 @@ function addUserModal() {
     ${field('Email *', 'email', '', 'email', 'required')}
     <label class="field"><span>Role</span>
       <select name="role" data-pick="role">
-        ${roleChoices().map((r) => `<option value="${esc(r)}"${r === 'viewer' ? ' selected' : ''}>${esc(roleLabel(r))}</option>`).join('')}
+        ${roleChoices().map((r) => `<option value="${esc(r)}"${r === 'viewer' ? ' selected' : ''}>${esc(roleOptionLabel(r))}</option>`).join('')}
         <option value="__custom__">+ Custom role…</option>
       </select>
     </label>
