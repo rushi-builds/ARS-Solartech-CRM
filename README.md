@@ -2,8 +2,8 @@
 
 Full-stack order tracking for ARS Solartech: orders, department stage approvals,
 working-day forecasts, capacity loading, dispatch log, per-user roles and an
-audit trail. Runs on Cloudflare Workers with a D1 database and "Sign in with
-Freebuff" accounts — no server to maintain, no passwords to store.
+audit trail. Runs on Cloudflare Workers with a D1 database and email + password
+accounts — no server to maintain.
 
 ```
 public/            static SPA (index.html, styles.css, app.js)  – no build step
@@ -15,24 +15,20 @@ schema.sql         D1 schema (same tables, for manual/local runs)
 build.mjs          esbuild bundle + Sites deploy manifest
 ```
 
-## Live deployment
+## Deployment
 
-| What | Value |
-| --- | --- |
-| Worker | `ars-solartech-crm` (Cloudflare account `Ktmenergyexperts`) |
-| URL | https://ars-solartech-crm.ktmenergyexperts.workers.dev |
-| Database | D1 `ars-solartech-crm` (`DB` binding, id `c456aba5-1466-48a8-9554-303c600f41c8`) |
-
-Both this and any other environment keep their own D1 database. Tables are
-created by the Worker on its first request (`src/schema.ts`), so a fresh
-database needs no manual step.
+The Worker and its D1 database live in your own Cloudflare account. Connection
+details stay in `wrangler.jsonc` and are never hard-coded in the application.
+Each environment keeps its own D1 database, and the tables are created by the
+Worker on its first request (`src/schema.ts`), so a fresh database needs no
+manual step.
 
 ## Accounts and sign-in
 
 Sign-in is email + password, handled entirely by this Worker — no third-party
 identity provider, so it runs in any Cloudflare account.
 
-* Passwords: PBKDF2-SHA256, 150k iterations, per-user random salt.
+* Passwords: PBKDF2-SHA256, 100k iterations, per-user random salt.
 * Sessions: random 256-bit token, stored SHA-256 hashed in `sessions`, sent as
   an `HttpOnly; SameSite=Lax` cookie (Secure on HTTPS), 30-day expiry.
 * **First visit** on an empty database shows *Create owner account*; that account
@@ -80,18 +76,18 @@ visit on `http://localhost:8787` asks you to create the owner account.
 
 ```bash
 npx wrangler login                      # once per machine
-npx wrangler d1 create ars-solartech-crm   # prints database_id
+npx wrangler d1 create <your-database-name>   # prints database_id
 # put that id in wrangler.jsonc under d1_databases[0].database_id
-npm run deploy                          # build + wrangler deploy
+npm run deploy                                # build + wrangler deploy
 ```
 
-The Worker URL is printed at the end (`https://<worker>.<account>.workers.dev`).
+The Worker URL is printed at the end (`https://<worker>.<subdomain>.workers.dev`).
 The D1 tables are created on the first request — nothing to run by hand.
 `APP_ORIGIN` is optional: when it is not set, the Worker derives the origin from
 the request (set it only if you serve the app from several hostnames).
 
-Custom domain: Workers & Pages → `ars-solartech-crm` → Settings → Domains &
-Routes → Add custom domain.
+Custom domain: Workers & Pages → your Worker → Settings → Domains & Routes →
+Add custom domain.
 
 ## Importing orders
 
