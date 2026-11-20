@@ -141,7 +141,7 @@ function apply(payload) {
    Keeps Worker request usage low: a reload within CACHE_TTL renders
    the last snapshot from sessionStorage without touching the API.
    The refresh button and every mutation always hit the server. */
-const CACHE_KEY = 'ars-snapshot-v1';
+const CACHE_KEY = 'ars-snapshot-v2';
 const CACHE_TTL = 5 * 60_000;
 
 function saveCache() {
@@ -1274,16 +1274,7 @@ function viewSettings() {
       </table>
     </div>
     <p class="sub-line" style="margin:6px 18px 16px">Access control belongs to the <strong>Super Admin</strong> department. Owner is locked at full control. Users, Settings, final approval and Delete ticks need the Users power, so only an Admin can hand those out.</p>
-  </div>` : `<div class="card" style="margin-top:14px">
-    <div class="card-head">
-      <div class="lead">
-        <span class="head-ico grey">${icon('gear')}</span>
-        <div><p class="h-eyebrow">Access control</p><h3>Who can do what</h3></div>
-      </div>
-      <span class="badge grey">Super Admin only</span>
-    </div>
-    <p class="sub-line" style="margin:0 18px 16px">Set this account's department to <strong>Super Admin</strong> in Directory to open it. The rest of Settings — planning, calendar, teams, alerts and backup — stays available.</p>
-  </div>`}
+  </div>` : ''}
 
   <div class="card" style="margin-top:14px">
     <div class="card-head">

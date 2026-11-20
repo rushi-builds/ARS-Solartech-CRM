@@ -482,7 +482,9 @@ async function notifyUser(c: any, target: User, title: string, body: string, ord
 
 async function snapshot(c: any) {
   const env = c.env as Env;
-  const user: User = c.get('user');
+  // Load the caller fresh: a PATCH may have just changed this account's own
+  // department or role, and the middleware copy is from before that write.
+  const user: User = (await getUser(env.DB, c.get('user').sub)) || c.get('user');
   const db = env.DB;
   const [settings, orders, stages, dispatches, stakeholders, users] = await Promise.all([
     getSettings(db),
