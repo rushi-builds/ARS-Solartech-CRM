@@ -57,10 +57,15 @@ import {
   setPassword,
   getSettings,
   listDispatchRows,
+  addDeptPerson,
+  assignStage,
+  deleteDeptPerson,
+  listDeptPeople,
   listEvents,
   listOrderRows,
   listStageRows,
   listStakeholders,
+  setOrderApproval,
   listUsers,
   getUser,
   logEvent,
@@ -253,10 +258,41 @@ const date = (v: unknown): string | null => {
   return s && /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : null;
 };
 
-async function headsMap(db: D1Database): Promise<Record<string, string>> {
-  const rows = (await listStakeholders(db)) as any[];
+export type RosterPerson = {
+  id: string;
+  dept: string;
+  name: string | null;
+  email: string | null;
+  phone: string | null;
+  sub: string | null;
+  account: boolean;
+};
+
+/** Everyone in every department: accounts first, then names added by hand. */
+async function deptRoster(db: D1Database): Promise<RosterPerson[]> {
+  const [people, users] = await Promise.all([listDeptPeople(db), listUsers(db)]);
+  const out: RosterPerson[] = [];
+  for (const u of users) {
+    if (!u.dept || !u.active) continue;
+    out.push({ id: 'acct-' + u.sub, dept: u.dept, name: u.name, email: u.email, phone: null, sub: u.sub, account: true });
+  }
+  for (const p of people) {
+    out.push({ id: p.id, dept: p.dept, name: p.name, email: p.email, phone: p.phone, sub: p.sub, account: false });
+  }
+  return out;
+}
+
+/** First couple of names per department, for the pipeline labels. */
+function headsFrom(roster: RosterPerson[]): Record<string, string> {
   const out: Record<string, string> = {};
-  for (const r of rows) if (r.dept && r.person) out[r.dept] = r.person;
+  const seen: Record<string, number> = {};
+  for (const p of roster) {
+    if (!p.name) continue;
+    const n = seen[p.dept] || 0;
+    seen[p.dept] = n + 1;
+    if (n >= 2) continue;
+    out[p.dept] = out[p.dept] ? out[p.dept] + ' · ' + p.name : p.name;
+  }
   return out;
 }
 
@@ -293,7 +329,8 @@ async function snapshot(c: any) {
     listStakeholders(db),
     listUsers(db),
   ]);
-  const heads = await headsMap(db);
+  const roster = await deptRoster(db);
+  const heads = headsFrom(roster);
   const today = todayISO();
   const enriched = enrich(orders, stages, dispatches, settings, heads, today);
   const dash = dashboard(enriched, 16, settings);
@@ -307,6 +344,7 @@ async function snapshot(c: any) {
     orders: enriched,
     dispatches,
     stakeholders,
+    deptPeople: roster,
     users,
     activity: await listEvents(db, 120),
     dashboard: dash,
@@ -392,13 +430,112 @@ app.post('/api/orders/:id/stages/:stage', async (c) => {
   const plan: any = enriched.live.plan;
   const planned = plan ? plan[stage] : null;
 
-  await setStage(c.env.DB, id, stage, d, planned ?? null, c.get('user').sub);
   const u: User = c.get('user');
+  const full = u.role === 'owner' || u.role === 'admin' || u.role === 'manager';
+  const assigned = await c.env.DB
+    .prepare('SELECT assigned_sub, assigned_name FROM order_stages WHERE order_id = ? AND stage = ?')
+    .bind(id, stage)
+    .first<{ assigned_sub: string | null; assigned_name: string | null }>();
+  if (d && assigned?.assigned_sub && assigned.assigned_sub !== u.sub && !full) {
+    return c.json({ error: 'not_assigned', message: `${assigned.assigned_name || 'Someone else'} is handling this stage` }, 403);
+  }
+
+  await setStage(c.env.DB, id, stage, d, planned ?? null, u.sub, u.name);
   const label = STAGE_META.find((m) => m.key === stage)?.actual || stage;
   await logEvent(c.env.DB, { sub: u.sub, name: u.name }, 'order', id, d ? 'stage_done' : 'stage_reopen',
     d ? `${label} - ${d}` : `${label} cleared`);
 
-  // Production finished with nothing dispatched yet: flag it for the dispatch desk.
+  return c.json({ ok: true, snapshot: await snapshot(c) });
+});
+
+// Pick the person inside the department who works this stage.
+app.post('/api/orders/:id/stages/:stage/assign', async (c) => {
+  const stage = c.req.param('stage') as StageKey;
+  if (!(STAGES as readonly string[]).includes(stage)) return c.json({ error: 'bad_stage' }, 400);
+  const denied = guard(c, stage as Action);
+  if (denied) return denied;
+  const id = c.req.param('id');
+  const order = await c.env.DB.prepare('SELECT id FROM orders WHERE id = ?').bind(id).first();
+  if (!order) return c.json({ error: 'not_found' }, 404);
+
+  const me: User = c.get('user');
+  const body = await c.req.json().catch(() => ({}));
+  const sub = str(body.sub, 60);
+  const full = me.role === 'owner' || me.role === 'admin' || me.role === 'manager';
+  let name: string | null = null;
+  if (sub) {
+    const target = await getUser(c.env.DB, sub);
+    if (!target || !target.active) return c.json({ error: 'bad_user', message: 'Pick an active account' }, 400);
+    if (!full && target.dept !== me.dept) {
+      return c.json({ error: 'wrong_dept', message: 'You can only assign people from your own department' }, 400);
+    }
+    name = target.name || target.email;
+  }
+
+  await assignStage(c.env.DB, id, stage, sub, name);
+  const label = STAGE_META.find((m) => m.key === stage)?.label || stage;
+  await logEvent(c.env.DB, { sub: me.sub, name: me.name }, 'order', id, 'assign',
+    `${label}: ${name || 'unassigned'}`);
+  return c.json({ ok: true, snapshot: await snapshot(c) });
+});
+
+// Final sign-off from Admin / Manager once every department is finished.
+app.post('/api/orders/:id/approval', async (c) => {
+  const me: User = c.get('user');
+  if (!['owner', 'admin', 'manager'].includes(me.role)) {
+    return c.json({ error: 'forbidden', message: 'Only Admin or Manager gives the final approval' }, 403);
+  }
+  const id = c.req.param('id');
+  const order = await c.env.DB.prepare('SELECT id FROM orders WHERE id = ?').bind(id).first();
+  if (!order) return c.json({ error: 'not_found' }, 404);
+  const body = await c.req.json().catch(() => ({}));
+  const approve = body.decision !== 'reset';
+
+  if (approve) {
+    const { results } = await c.env.DB
+      .prepare('SELECT stage FROM order_stages WHERE order_id = ? AND actual_date IS NOT NULL')
+      .bind(id)
+      .all<{ stage: string }>();
+    const done = new Set((results || []).map((r) => r.stage));
+    const missing = STAGE_META.filter((m) => !done.has(m.key));
+    if (missing.length) {
+      return c.json({ error: 'stages_open', message: `Still open: ${missing.map((m) => m.label).join(', ')}` }, 400);
+    }
+  }
+
+  await setOrderApproval(c.env.DB, id, approve ? 'approved' : 'pending', me.sub);
+  await logEvent(c.env.DB, { sub: me.sub, name: me.name }, 'order', id, approve ? 'approved' : 'approval_reset',
+    approve ? 'Final approval given' : 'Final approval reopened');
+  return c.json({ ok: true, snapshot: await snapshot(c) });
+});
+
+// ---------------------------------------------------------------- department people
+app.post('/api/dept-people', async (c) => {
+  const denied = guard(c, 'settings');
+  if (denied) return denied;
+  const body = await c.req.json().catch(() => ({}));
+  const dept = deptName(body.dept);
+  if (!dept) return c.json({ error: 'dept_required', message: 'Pick a department first' }, 400);
+  const name = str(body.name, 80);
+  const email = str(body.email, 120);
+  const phone = str(body.phone, 30);
+  if (!name && !email && !phone) {
+    return c.json({ error: 'name_required', message: 'Enter a name, email or mobile' }, 400);
+  }
+  const me: User = c.get('user');
+  await addDeptPerson(c.env.DB, { id: crypto.randomUUID(), dept, name, email, phone });
+  await logEvent(c.env.DB, { sub: me.sub, name: me.name }, 'dept', dept, 'person_add',
+    `${name || email || phone} added to ${dept}`);
+  return c.json({ ok: true, snapshot: await snapshot(c) });
+});
+
+app.delete('/api/dept-people/:id', async (c) => {
+  const denied = guard(c, 'settings');
+  if (denied) return denied;
+  const id = c.req.param('id');
+  const me: User = c.get('user');
+  await deleteDeptPerson(c.env.DB, id);
+  await logEvent(c.env.DB, { sub: me.sub, name: me.name }, 'dept', id, 'person_remove', 'Department contact removed');
   return c.json({ ok: true, snapshot: await snapshot(c) });
 });
 

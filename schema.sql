@@ -64,6 +64,9 @@ CREATE TABLE IF NOT EXISTS orders (
   o_prd          INTEGER,
   remarks        TEXT,
   status         TEXT NOT NULL DEFAULT 'open',   -- open | closed | cancelled
+  approval       TEXT NOT NULL DEFAULT 'pending',-- pending | approved
+  approved_by    TEXT,
+  approved_at    TEXT,
   created_at     TEXT NOT NULL,
   created_by     TEXT,
   updated_at     TEXT NOT NULL,
@@ -75,10 +78,27 @@ CREATE TABLE IF NOT EXISTS order_stages (
   stage        TEXT NOT NULL,                    -- des apr mat ps pf qc dsp
   actual_date  TEXT,
   planned_date TEXT,
+  assigned_sub TEXT,                             -- who inside the department owns it
+  assigned_name TEXT,
+  done_sub     TEXT,
+  done_name    TEXT,
   updated_by   TEXT,
   updated_at   TEXT,
   PRIMARY KEY (order_id, stage)
 );
+
+CREATE TABLE IF NOT EXISTS dept_people (
+  id          TEXT PRIMARY KEY,
+  dept        TEXT NOT NULL,
+  name        TEXT,
+  email       TEXT,
+  phone       TEXT,
+  sub         TEXT,
+  sort        INTEGER NOT NULL DEFAULT 0,
+  created_at  TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_dept_people_dept ON dept_people(dept, sort);
 
 CREATE TABLE IF NOT EXISTS dispatches (
   id          TEXT PRIMARY KEY,

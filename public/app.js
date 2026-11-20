@@ -316,6 +316,44 @@ function renderNotifs() {
     </div>`).join(''));
   }
 
+  const me = S.d.me;
+  const mine = [];
+  for (const o of S.d.orders) {
+    if (o.live.rag === 'CLOSED') continue;
+    for (const key of Object.keys(o.asg || {})) {
+      const who = o.asg[key];
+      if (who && who.sub === me.sub && !(o.a || {})[key]) { mine.push({ o, key }); break; }
+    }
+  }
+  if (mine.length) {
+    parts.push(`<div class="pop-section">Your work · ${mine.length}</div>`);
+    parts.push(mine.map(({ o, key }) => {
+      const meta = (S.d.meta.stages || []).find((s) => s.key === key) || {};
+      const due = o.live.plan ? o.live.plan[key] : null;
+      const late = due ? Math.max(0, Math.round((Date.parse(S.d.today) - Date.parse(due)) / 86400000)) : 0;
+      return `<button class="notif-item blue" data-act="open-order" data-id="${esc(o.id)}">
+        <span class="n-dot"></span>
+        <span><span class="n-title">${esc(o.customer || o.id)}</span>
+        <span class="n-sub">${esc(meta.label || key)} · ${late > 0 ? late + ' day' + (late === 1 ? '' : 's') + ' late' : 'plan ' + fmt(due)}</span></span>
+      </button>`;
+    }).join(''));
+  }
+  const awaiting = FULL_ROLES.includes(me.role)
+    ? S.d.orders.filter((o) => o.live.rag === 'CLOSED' && o.approval !== 'approved')
+    : [];
+  if (awaiting.length) {
+    parts.push(`<div class="pop-section">Final approval · ${awaiting.length}</div>`);
+    parts.push(awaiting.map((o) => `<div class="notif-item green static">
+      <span class="n-dot"></span>
+      <span><span class="n-title">${esc(o.customer || o.id)}</span>
+      <span class="n-sub">Every department is done — sign off to close</span>
+      <span class="req-actions">
+        <button class="btn primary small" data-act="approve-order" data-id="${esc(o.id)}">Approve</button>
+        <button class="btn ghost small" data-act="open-order" data-id="${esc(o.id)}">Open</button>
+      </span></span>
+    </div>`).join(''));
+  }
+
   parts.push('<div class="pop-section">Pipeline alerts</div>');
   parts.push(attention.length
     ? attention.map((a) => {
@@ -332,13 +370,15 @@ function renderNotifs() {
 
   list.innerHTML = parts.join('');
   const badge = $('#notifCount');
-  const total = attention.length + (canDecide ? pending.length : 0);
+  const total = attention.length + (canDecide ? pending.length : 0) + mine.length + awaiting.length;
   if (badge) { badge.textContent = total; badge.hidden = !total; }
   const sub = $('#notifSub');
   if (sub) {
     const bits = [];
+    if (mine.length) bits.push(`${mine.length} task${mine.length === 1 ? '' : 's'} for you`);
+    if (awaiting.length) bits.push(`${awaiting.length} to approve`);
     if (pending.length) bits.push(`${pending.length} request${pending.length === 1 ? '' : 's'}`);
-    bits.push(`${k.overdue} late · ${k.red} red`);
+    bits.push(`${k.overdue} stage${k.overdue === 1 ? '' : 's'} late`);
     sub.textContent = bits.join(' · ');
   }
 }
@@ -380,7 +420,7 @@ function greeting() {
 
 function ragBadge(rag) {
   const cls = rag === 'RED' ? 'red' : rag === 'AMBER' ? 'amber' : rag === 'GREEN' ? 'green' : 'grey';
-  const label = ({ RED: 'Red · late', AMBER: 'Amber', GREEN: 'Green', CLOSED: 'Closed', 'NOT PLANNED': 'Not planned' })[rag] || rag;
+  const label = ({ RED: 'Late', AMBER: 'At risk', GREEN: 'On track', CLOSED: 'Closed', 'NOT PLANNED': 'Not planned' })[rag] || rag;
   return `<span class="badge ${cls}">${esc(label)}</span>`;
 }
 
@@ -414,9 +454,9 @@ function viewDashboard() {
 
   <div class="grid cols-4">
     ${kpiTile('Active orders', k.active, `${n1(k.activeMt)} MT in the pipeline`, 'accent', 'open orders')}
-    ${kpiTile('Late', k.red, 'forecast misses the due date', 'red', 'red orders')}
-    ${kpiTile('Delayed', k.overdue, 'stages past their planned date', 'amber', 'late stages')}
-    ${kpiTile('On track', k.green, `${k.closed} dispatched / closed`, 'green', 'green orders')}
+    ${kpiTile('Late', k.red, 'forecast misses the due date', 'red', 'past due')}
+    ${kpiTile('Delayed', k.overdue, 'stages past their planned date', 'amber', 'past plan')}
+    ${kpiTile('On track', k.green, `${k.closed} dispatched / closed`, 'green', 'on schedule')}
   </div>
 
   <div class="card" style="margin-top:14px">
@@ -566,7 +606,7 @@ function viewOrders() {
       ${opt('all', 'All status', S.status)}${opt('open', 'Open', S.status)}${opt('closed', 'Closed', S.status)}${opt('cancelled', 'Cancelled', S.status)}
     </select>
     <select id="fRag">
-      ${opt('all', 'Any RAG', S.rag)}${opt('RED', 'Red', S.rag)}${opt('AMBER', 'Amber', S.rag)}${opt('GREEN', 'Green', S.rag)}${opt('CLOSED', 'Closed', S.rag)}
+      ${opt('all', 'Any timeline', S.rag)}${opt('RED', 'Late', S.rag)}${opt('AMBER', 'At risk', S.rag)}${opt('GREEN', 'On track', S.rag)}${opt('CLOSED', 'Closed', S.rag)}
     </select>
     <select id="fStage">
       ${opt('all', 'Any stage', S.stage)}
@@ -591,7 +631,7 @@ function viewOrders() {
       <div class="strip">
         <span><b>${n1(mt)}</b> MT to dispatch</span>
         <span><b>${open.length}</b> open</span>
-        <span><b>${rows.filter((o) => o.live.rag === 'RED').length}</b> red</span>
+        <span><b>${rows.filter((o) => o.live.rag === 'RED').length}</b> late</span>
       </div>
     </div>
     <div class="table-wrap">
@@ -641,7 +681,7 @@ function orderRow(o) {
     <td>${fmt(o.live.forecastDispatch)}</td>
     <td class="num">${bufferCell(o)}</td>
     <td><span class="prog"><span class="bar blue"><i style="width:${pct}%"></i></span><b>${pct}%</b></span></td>
-    <td>${ragBadge(o.live.rag)}</td>
+    <td>${ragBadge(o.live.rag)}${o.live.rag === 'CLOSED' && o.approval !== 'approved' ? '<small class="sub-line">approval pending</small>' : ''}</td>
   </tr>`;
 }
 
@@ -671,6 +711,23 @@ function openDrawer(id, silent) {
       <span class="badge grey">${esc(o.live.stage)}</span>
       ${o.live.sopFlag ? `<span class="badge amber">${esc(o.live.sopFlag)}</span>` : ''}
     </div>
+
+    ${o.live.rag === 'CLOSED'
+      ? (o.approval === 'approved'
+        ? `<div class="card tight" style="margin-bottom:14px;border-color:rgba(74,222,128,.35)">
+             <b>Final approval given</b>
+             <p class="sub-line" style="margin-top:4px">All departments finished and an admin signed off${o.approved_at ? ' on ' + fmt(String(o.approved_at).slice(0, 10)) : ''}.</p>
+           </div>`
+        : `<div class="card tight" style="margin-bottom:14px;border-color:rgba(251,191,36,.4)">
+             <b>Waiting for final approval</b>
+             <p class="sub-line" style="margin-top:4px">Every department has finished. Admin / Manager signs off to close the order.</p>
+             <div class="inline" style="margin-top:10px">
+               ${FULL_ROLES.includes(S.d.me.role)
+                 ? `<button class="btn primary small" data-act="approve-order" data-id="${esc(o.id)}">Give final approval</button>`
+                 : '<span class="sub-line">Asked from the admin</span>'}
+             </div>
+           </div>`)
+      : ''}
 
     <div class="card tight" style="margin-bottom:14px">
       <div class="kv">
@@ -738,20 +795,34 @@ function stageRowHtml(o, m, plan) {
   const actual = o.a ? o.a[m.key] : null;
   const planned = plan ? plan[m.key] : null;
   const allowed = cap(m.key);
+  const team = (S.d.deptPeople || []).filter((p) => p.dept === m.dept && p.sub);
+  const asg = (o.asg || {})[m.key] || {};
+  const by = (o.verif || {})[m.key] || {};
+  const mine = asg.sub && asg.sub === S.d.me.sub;
+  const full = FULL_ROLES.includes(S.d.me.role);
+  const canDo = !!allowed && (!asg.sub || mine || full);
   const current = !actual && o.live.stageNo === m.no;
   return `<div class="stage-row ${actual ? 'done' : ''} ${current ? 'current' : ''}">
     <div class="stage-no">${actual ? '✓' : m.no}</div>
     <div>
       <div class="stage-name">${esc(m.actual)}</div>
-      <div class="stage-meta">${esc(m.label)} · ${esc(m.dept)}${planned ? ' · plan ' + fmt(planned) : ''}</div>
+      <div class="stage-meta">${esc(m.label)} · ${esc(m.dept)}${planned ? ' · plan ' + fmt(planned) : ''}${asg.name ? ' · ' + esc(asg.name) : ''}</div>
     </div>
     <div class="stage-act">
       ${actual
-        ? `<span class="badge green">${fmt(actual)}</span>${allowed ? `<button class="btn ghost small" data-act="stage-clear" data-id="${esc(o.id)}" data-stage="${m.key}">Undo</button>` : ''}`
-        : allowed
-          ? `<input type="date" data-stage-input="${m.key}" value="${S.d.today}" />
-             <button class="btn small" data-act="stage-set" data-id="${esc(o.id)}" data-stage="${m.key}">Mark done</button>`
-          : `<span class="sub-line">${esc(m.dept)} only</span>`}
+        ? `<span class="badge green">${fmt(actual)}</span>${by.name ? `<small class="sub-line">by ${esc(by.name)}</small>` : ''}${allowed ? `<button class="btn ghost small" data-act="stage-clear" data-id="${esc(o.id)}" data-stage="${m.key}">Undo</button>` : ''}`
+        : `<div class="stage-assign">
+             ${allowed
+               ? `<select class="role-input" data-assign-stage="${m.key}" data-order="${esc(o.id)}">
+                    <option value="" ${asg.sub ? '' : 'selected'}>Who works this?</option>
+                    ${team.map((p) => `<option value="${esc(p.sub)}" ${asg.sub === p.sub ? 'selected' : ''}>${esc(p.name || p.email)}</option>`).join('')}
+                  </select>`
+               : (asg.name ? `<span class="sub-line">${esc(asg.name)}</span>` : `<span class="sub-line">${esc(m.dept)} only</span>`)}
+             ${canDo
+               ? `<input type="date" data-stage-input="${m.key}" value="${S.d.today}" />
+                  <button class="btn small" data-act="stage-set" data-id="${esc(o.id)}" data-stage="${m.key}">Mark done</button>`
+               : asg.name ? `<span class="sub-line">${esc(asg.name)} marks it</span>` : ''}
+           </div>`}
     </div>
   </div>`;
 }
@@ -1015,7 +1086,7 @@ function viewUsers() {
 function viewSettings() {
   const s = S.d.settings;
   const canEdit = cap('settings');
-  const st = new Map(S.d.stakeholders.map((x) => [x.dept, x]));
+  const roster = S.d.deptPeople || [];
 
   return `
   <div class="split">
@@ -1050,21 +1121,27 @@ function viewSettings() {
       </div>
 
       <div class="card">
-        <div class="card-head"><div class="lead"><span class="head-ico grey">${icon('users')}</span><div><p class="h-eyebrow">Owners</p><h3>Department heads</h3></div></div><span class="hint">shown on the order drawer</span></div>
-        <div class="table-wrap"><table>
-          <thead><tr><th>Department</th><th>Person</th><th>Mobile</th><th>Scope</th></tr></thead>
-          <tbody>
-            ${S.d.meta.depts.map((d) => {
-              const row = st.get(d) || {};
-              return `<tr>
-                <td class="cust">${esc(d)}</td>
-                <td><input data-stake="person" data-dept="${esc(d)}" value="${esc(row.person)}" ${canEdit ? '' : 'disabled'} style="width:100%" /></td>
-                <td><input data-stake="phone" data-dept="${esc(d)}" value="${esc(row.phone)}" ${canEdit ? '' : 'disabled'} style="width:100%" /></td>
-                <td><input data-stake="scope" data-dept="${esc(d)}" value="${esc(row.scope)}" ${canEdit ? '' : 'disabled'} style="width:100%" /></td>
-              </tr>`;
-            }).join('')}
-          </tbody>
-        </table></div>
+        <div class="card-head"><div class="lead"><span class="head-ico grey">${icon('users')}</span><div><p class="h-eyebrow">Teams</p><h3>Department team</h3></div></div><span class="hint">${roster.length} people · accounts sync automatically</span></div>
+        <div class="dept-team">
+          ${S.d.meta.depts.map((d) => {
+            const members = roster.filter((p) => p.dept === d);
+            return `<div class="dept-block">
+              <div class="dept-block-head"><b>${esc(d)}</b><span class="badge grey">${members.length}</span></div>
+              ${members.length
+                ? `<div class="member-list">${members.map((m) => `<div class="member">
+                     <span class="team-ava">${esc(initials(m.name, m.email))}</span>
+                     <span class="member-main"><b>${esc(m.name || m.email || '—')}</b><small>${esc(m.email || m.phone || '')}${m.account ? ' · account' : ''}</small></span>
+                     ${canEdit && !m.account ? `<button class="icon-btn" data-act="del-dept-person" data-id="${esc(m.id)}" title="Remove">×</button>` : ''}
+                   </div>`).join('')}</div>`
+                : '<p class="sub-line">Nobody yet.</p>'}
+              ${canEdit ? `<div class="inline" style="margin-top:8px">
+                <input data-person="name" data-dept="${esc(d)}" placeholder="Name" style="min-width:0" />
+                <input data-person="email" data-dept="${esc(d)}" placeholder="Email or mobile" style="min-width:0" />
+                <button class="btn ghost small" data-act="add-dept-person" data-dept="${esc(d)}">+ Add</button>
+              </div>` : ''}
+            </div>`;
+          }).join('')}
+        </div>
       </div>
 
       <div class="card">
@@ -1078,7 +1155,6 @@ function viewSettings() {
 
       ${canEdit ? `<div class="form-actions" style="justify-content:flex-start">
         <button class="btn primary" data-act="save-settings">Save planning settings</button>
-        <button class="btn" data-act="save-stakeholders">Save department heads</button>
       </div>` : `<p class="sub-line">Only an admin can change settings.</p>`}
     </div>
 
@@ -1728,6 +1804,38 @@ const ACTIONS = {
     render();
   },
   'custom-role': (el) => customRoleModal(el.dataset.id, el.dataset.name || '', el.dataset.current || ''),
+  'add-dept-person': async (el) => {
+    const dept = el.dataset.dept;
+    const box = $$('[data-person]').filter((i) => i.dataset.dept === dept);
+    const nameEl = box.find((i) => i.dataset.person === 'name');
+    const mailEl = box.find((i) => i.dataset.person === 'email');
+    const name = (nameEl && nameEl.value.trim()) || '';
+    const contact = (mailEl && mailEl.value.trim()) || '';
+    if (!name && !contact) return toast('Enter a name or contact first', 'err');
+    const isMail = contact.includes('@');
+    el.disabled = true;
+    try {
+      const res = await api('/api/dept-people', 'POST', {
+        dept, name, email: isMail ? contact : '', phone: isMail ? '' : contact,
+      });
+      apply(res); render(); toast(`${name || contact} added to ${dept}`, 'ok');
+    } catch (e) { toast(e.message, 'err'); el.disabled = false; }
+  },
+  'del-dept-person': async (el) => {
+    if (!confirm('Remove this person from the department?')) return;
+    try {
+      const res = await api('/api/dept-people/' + encodeURIComponent(el.dataset.id), 'DELETE');
+      apply(res); render(); toast('Removed', 'ok');
+    } catch (e) { toast(e.message, 'err'); }
+  },
+  'approve-order': async (el) => {
+    el.disabled = true;
+    try {
+      const res = await api('/api/orders/' + encodeURIComponent(el.dataset.id) + '/approval', 'POST', { decision: 'approve' });
+      apply(res); render(); if (S.open === el.dataset.id) openDrawer(el.dataset.id, true);
+      toast('Final approval given', 'ok');
+    } catch (e) { toast(e.message, 'err'); el.disabled = false; }
+  },
   'request-access': () => requestAccessModal(),
   'req-approve': async (el) => {
     el.disabled = true;
@@ -1777,7 +1885,23 @@ document.addEventListener('click', (ev) => {
   closePanels();
 });
 
-document.addEventListener('change', (ev) => {
+document.addEventListener('change', async (ev) => {
+  const asgSel = ev.target.closest('[data-assign-stage]');
+  if (asgSel) {
+    try {
+      const res = await api(
+        `/api/orders/${encodeURIComponent(asgSel.dataset.order)}/stages/${encodeURIComponent(asgSel.dataset.assignStage)}/assign`,
+        'POST',
+        { sub: asgSel.value || null },
+      );
+      apply(res); render(); if (S.open === asgSel.dataset.order) openDrawer(asgSel.dataset.order, true);
+      toast(asgSel.value ? 'Stage assigned' : 'Assignment cleared', 'ok');
+    } catch (e) {
+      toast(e.message, 'err');
+      if (S.open) openDrawer(S.open, true);
+    }
+    return;
+  }
   const pick = ev.target.closest('[data-pick]');
   if (!pick) return;
   const form = pick.closest('form');

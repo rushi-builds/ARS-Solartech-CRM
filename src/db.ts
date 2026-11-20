@@ -291,6 +291,40 @@ export async function saveStakeholder(
     .run();
 }
 
+// ---------------- department people ----------------
+// A department can have any number of people. Accounts join automatically
+// through their own department; extra names can be added by hand.
+export type DeptPerson = {
+  id: string;
+  dept: string;
+  name: string | null;
+  email: string | null;
+  phone: string | null;
+  sub: string | null;
+  sort: number;
+};
+
+export async function listDeptPeople(db: D1Database): Promise<DeptPerson[]> {
+  const { results } = await db
+    .prepare('SELECT id, dept, name, email, phone, sub, sort FROM dept_people ORDER BY sort, name')
+    .all<DeptPerson>();
+  return results || [];
+}
+
+export async function addDeptPerson(
+  db: D1Database,
+  p: { id: string; dept: string; name?: string | null; email?: string | null; phone?: string | null },
+) {
+  await db
+    .prepare('INSERT INTO dept_people (id, dept, name, email, phone, sub, sort, created_at) VALUES (?, ?, ?, ?, ?, NULL, 0, ?)')
+    .bind(p.id, p.dept, p.name || null, p.email || null, p.phone || null, nowISO())
+    .run();
+}
+
+export async function deleteDeptPerson(db: D1Database, id: string) {
+  await db.prepare('DELETE FROM dept_people WHERE id = ?').bind(id).run();
+}
+
 // ---------------- orders ----------------
 export type OrderRow = {
   id: string;
@@ -309,6 +343,9 @@ export type OrderRow = {
   o_prd: number | null;
   remarks: string | null;
   status: string;
+  approval?: string | null;
+  approved_by?: string | null;
+  approved_at?: string | null;
   created_at: string;
   created_by: string | null;
   updated_at: string;
@@ -341,10 +378,21 @@ export async function listOrderRows(db: D1Database): Promise<OrderRow[]> {
   return results || [];
 }
 
-export async function listStageRows(db: D1Database): Promise<{ order_id: string; stage: string; actual_date: string | null }[]> {
+export type StageRow = {
+  order_id: string;
+  stage: string;
+  actual_date: string | null;
+  planned_date?: string | null;
+  assigned_sub?: string | null;
+  assigned_name?: string | null;
+  done_sub?: string | null;
+  done_name?: string | null;
+};
+
+export async function listStageRows(db: D1Database): Promise<StageRow[]> {
   const { results } = await db
-    .prepare('SELECT order_id, stage, actual_date FROM order_stages WHERE actual_date IS NOT NULL')
-    .all<{ order_id: string; stage: string; actual_date: string }>();
+    .prepare('SELECT order_id, stage, actual_date, planned_date, assigned_sub, assigned_name, done_sub, done_name FROM order_stages')
+    .all<StageRow>();
   return results || [];
 }
 
@@ -357,22 +405,34 @@ export async function listDispatchRows(db: D1Database): Promise<DispatchRow[]> {
 
 export type EnrichedOrder = OrderRow & {
   a: Actuals;
+  asg: Record<string, { sub: string | null; name: string | null }>;
+  verif: Record<string, { name: string | null; at: string | null }>;
   live: ReturnType<typeof liveStatus>;
 };
 
 export function enrich(
   orders: OrderRow[],
-  stageRows: { order_id: string; stage: string; actual_date: string | null }[],
+  stageRows: StageRow[],
   dispatches: DispatchRow[],
   settings: Settings,
   heads: Record<string, string>,
   today?: string,
 ): EnrichedOrder[] {
   const actuals: Record<string, Actuals> = {};
+  const asg: Record<string, Record<string, { sub: string | null; name: string | null }>> = {};
+  const verif: Record<string, Record<string, { name: string | null; at: string | null }>> = {};
   for (const r of stageRows) {
+    if (r.assigned_sub || r.assigned_name) {
+      asg[r.order_id] = asg[r.order_id] || {};
+      asg[r.order_id][r.stage] = { sub: r.assigned_sub || null, name: r.assigned_name || null };
+    }
     if (!r.actual_date) continue;
     if (!actuals[r.order_id]) actuals[r.order_id] = {};
     if ((STAGES as readonly string[]).includes(r.stage)) actuals[r.order_id][r.stage as StageKey] = r.actual_date;
+    if (r.done_name) {
+      verif[r.order_id] = verif[r.order_id] || {};
+      verif[r.order_id][r.stage] = { name: r.done_name, at: r.actual_date };
+    }
   }
   const dispatched: Record<string, number> = {};
   for (const d of dispatches) {
@@ -384,6 +444,8 @@ export function enrich(
     return {
       ...o,
       a,
+      asg: asg[o.id] || {},
+      verif: verif[o.id] || {},
       live: liveStatus(o as PlanOrder, a, dispatched[o.id] || 0, settings, heads, today),
     };
   });
@@ -431,15 +493,49 @@ export async function setStage(
   actualDate: string | null,
   plannedDate: string | null,
   by: string,
+  doneName: string | null = null,
 ) {
   await db
     .prepare(
-      `INSERT INTO order_stages (order_id, stage, actual_date, planned_date, updated_by, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?)
+      `INSERT INTO order_stages (order_id, stage, actual_date, planned_date, done_sub, done_name, updated_by, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(order_id, stage) DO UPDATE SET actual_date = excluded.actual_date,
-         planned_date = excluded.planned_date, updated_by = excluded.updated_by, updated_at = excluded.updated_at`,
+         planned_date = excluded.planned_date, done_sub = excluded.done_sub,
+         done_name = excluded.done_name, updated_by = excluded.updated_by, updated_at = excluded.updated_at`,
     )
-    .bind(orderId, stage, actualDate, plannedDate, by, nowISO())
+    .bind(orderId, stage, actualDate, plannedDate, actualDate ? by : null, actualDate ? doneName : null, by, nowISO())
+    .run();
+}
+
+/** Who inside the department works this stage of this order. */
+export async function assignStage(
+  db: D1Database,
+  orderId: string,
+  stage: StageKey,
+  sub: string | null,
+  name: string | null,
+) {
+  await db
+    .prepare(
+      `INSERT INTO order_stages (order_id, stage, assigned_sub, assigned_name, updated_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(order_id, stage) DO UPDATE SET assigned_sub = excluded.assigned_sub,
+         assigned_name = excluded.assigned_name, updated_at = excluded.updated_at`,
+    )
+    .bind(orderId, stage, sub, name, nowISO())
+    .run();
+}
+
+/** Final sign-off: only after every department has finished. */
+export async function setOrderApproval(
+  db: D1Database,
+  orderId: string,
+  approval: 'pending' | 'approved',
+  by: string | null,
+) {
+  await db
+    .prepare('UPDATE orders SET approval = ?, approved_by = ?, approved_at = ?, updated_at = ? WHERE id = ?')
+    .bind(approval, approval === 'approved' ? by : null, approval === 'approved' ? nowISO() : null, nowISO(), orderId)
     .run();
 }
 

@@ -43,6 +43,10 @@ const DDL: string[] = [
     eway TEXT, lr TEXT, qc_ref TEXT, remarks TEXT,
     created_at TEXT NOT NULL, created_by TEXT, updated_at TEXT
   )`,
+  `CREATE TABLE IF NOT EXISTS dept_people (
+    id TEXT PRIMARY KEY, dept TEXT NOT NULL, name TEXT, email TEXT, phone TEXT,
+    sub TEXT, sort INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL
+  )`,
   `CREATE TABLE IF NOT EXISTS access_requests (
     id TEXT PRIMARY KEY, sub TEXT NOT NULL, email TEXT, name TEXT,
     ask_role TEXT, ask_dept TEXT, note TEXT,
@@ -60,6 +64,12 @@ const DDL: string[] = [
   `CREATE INDEX IF NOT EXISTS idx_disp_order ON dispatches(order_id)`,
   `CREATE INDEX IF NOT EXISTS idx_events_at ON events(at DESC)`,
   `CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)`,
+  `CREATE INDEX IF NOT EXISTS idx_dept_people_dept ON dept_people(dept, sort)`,
+  // One-off copy of the old single-head rows so nobody disappears.
+  `INSERT INTO dept_people (id, dept, name, email, phone, sub, sort, created_at)
+   SELECT 'legacy-' || dept, dept, person, email, phone, NULL, sort, datetime('now')
+   FROM stakeholders WHERE person IS NOT NULL AND person != ''
+   AND NOT EXISTS (SELECT 1 FROM dept_people d WHERE d.id = 'legacy-' || stakeholders.dept)`,
   `CREATE INDEX IF NOT EXISTS idx_sessions_sub ON sessions(sub)`,
   `CREATE INDEX IF NOT EXISTS idx_access_status ON access_requests(status, created_at DESC)`,
   `CREATE INDEX IF NOT EXISTS idx_access_sub ON access_requests(sub)`,
@@ -67,7 +77,16 @@ const DDL: string[] = [
 
 // Columns added after the first release. SQLite has no ADD COLUMN IF NOT EXISTS,
 // so each one is applied on its own and treated as done when it already exists.
-const ALTERS: string[] = [`ALTER TABLE users ADD COLUMN pass_hash TEXT`];
+const ALTERS: string[] = [
+  `ALTER TABLE users ADD COLUMN pass_hash TEXT`,
+  `ALTER TABLE order_stages ADD COLUMN assigned_sub TEXT`,
+  `ALTER TABLE order_stages ADD COLUMN assigned_name TEXT`,
+  `ALTER TABLE order_stages ADD COLUMN done_sub TEXT`,
+  `ALTER TABLE order_stages ADD COLUMN done_name TEXT`,
+  `ALTER TABLE orders ADD COLUMN approval TEXT NOT NULL DEFAULT 'pending'`,
+  `ALTER TABLE orders ADD COLUMN approved_by TEXT`,
+  `ALTER TABLE orders ADD COLUMN approved_at TEXT`,
+];
 
 let ready: Promise<void> | null = null;
 
