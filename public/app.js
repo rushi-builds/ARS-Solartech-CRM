@@ -926,7 +926,7 @@ function viewUsers() {
     ${decided.length ? `<div class="req-list decided">${decided.map((r) => reqRow(r, false)).join('')}</div>` : ''}
   </div>
 
-  <div class="grid cols-2" style="margin-bottom:14px">
+  <div style="margin-bottom:14px">
     <div class="card">
       <div class="card-head">
         <div class="lead">
@@ -943,22 +943,6 @@ function viewUsers() {
         <li><b>They can ask for more</b><span>Request access from the account menu; an admin approves or denies it.</span></li>
       </ol>
     </div>
-    <div class="card">
-      <div class="card-head">
-        <div class="lead">
-          <span class="head-ico">${icon('gear')}</span>
-          <div><p class="h-eyebrow">Roles</p><h3>What each role can do</h3></div>
-        </div>
-      </div>
-      <div class="role-cat">
-        <div class="role-card"><b>Admin · owner</b><span>God-level: every order, setting, account and deletion.</span></div>
-        <div class="role-card"><b>Manager</b><span>Full control too — orders, settings, roles and access requests.</span></div>
-        <div class="role-card"><b>Editor</b><span>Only their department's stages and dispatch log.</span></div>
-        <div class="role-card"><b>Viewer</b><span>Read only across the workspace.</span></div>
-        ${customs.map((r) => `<div class="role-card custom"><b>${esc(r)}</b><span>Custom role · works like Editor, limited to the assigned department.</span></div>`).join('')}
-      </div>
-      <p class="sub-line" style="margin-top:11px">Choose <strong>+ Custom role…</strong> on any row and type your own title — Store Keeper, Dispatch Lead, QC Engineer. Access stays department-scoped.</p>
-    </div>
   </div>
 
   <div class="card flush">
@@ -968,7 +952,7 @@ function viewUsers() {
         <div><p class="h-eyebrow">Directory</p><h3>Accounts</h3></div>
       </div>
       <div class="inline">
-        <span class="hint">${owner ? 'Owner: ' + esc(owner.name || owner.email || owner.sub) : 'No owner account'}</span>
+        <span class="hint">${owner ? 'Admin: ' + esc(owner.name || owner.email || owner.sub) : 'No admin account'}</span>
         ${canManage ? '<button class="btn primary small" data-act="add-user">+ Add user</button>' : ''}
       </div>
     </div>
@@ -983,22 +967,23 @@ function viewUsers() {
                 <div class="who">
                   <span class="team-ava">${esc(initials(u.name, u.email))}</span>
                   <span>
-                    <span class="cust">${esc(u.name || 'Unnamed')}${u.sub === S.d.me.sub ? ' <span class="badge blue">you</span>' : ''}${(u.email || '').toLowerCase() === SUPER_ADMIN_EMAIL ? ' <span class="badge amber">super admin</span>' : ''}</span>
+                    <span class="cust">${esc(u.name || 'Unnamed')}${u.sub === S.d.me.sub ? ' <span class="badge blue">you</span>' : ''}</span>
                     <small class="sub-line">${esc(u.email || 'no email on account')}</small>
                   </span>
                 </div>
               </td>
               <td>
-                <select class="role-input" data-user-dept="${esc(u.sub)}" ${canManage ? '' : 'disabled'}>
+                <select class="role-input" data-user-dept="${esc(u.sub)}" data-current="${esc(u.dept || '')}" ${canManage ? '' : 'disabled'}>
                   <option value="">— none —</option>
-                  ${depts.map((d) => opt(d, d, u.dept)).join('')}
+                  ${[...new Set([...depts, ...(u.dept ? [u.dept] : [])])].map((d) => opt(d, d, u.dept)).join('')}
+                  <option value="__custom__">+ Custom department…</option>
                 </select>
               </td>
               <td>
                 ${isOwner
-                  ? '<span class="badge amber">Admin · owner</span>'
+                  ? '<span class="badge amber">Admin</span>'
                   : (u.email || '').toLowerCase() === SUPER_ADMIN_EMAIL
-                    ? '<span class="badge amber">Admin · owner</span>'
+                    ? '<span class="badge amber">Admin</span>'
                   : `<select class="role-input" data-user-role="${esc(u.sub)}" data-current="${esc(u.role)}" ${canManage ? '' : 'disabled'}>
                        ${roleList(u.role)}
                      </select>`}
@@ -1258,19 +1243,43 @@ function dispatchModal(orderId) {
   });
 }
 
+function roleChoices(current) {
+  const list = ['admin', 'manager', 'editor', 'viewer'];
+  for (const r of S.d.meta.customRoles || []) if (!list.includes(r)) list.push(r);
+  for (const u of S.d.users || []) if (u.role && !list.includes(u.role) && u.role !== 'owner') list.push(u.role);
+  if (current && !list.includes(current)) list.push(current);
+  return list;
+}
+
+function deptChoices(current) {
+  const list = [...(S.d.meta.depts || [])];
+  if (current && !list.includes(current)) list.push(current);
+  return list;
+}
+
 function addUserModal() {
-  const depts = S.d.meta.depts;
   const body = `<div class="form-grid">
     ${field('Full name', 'name', '')}
     ${field('Email *', 'email', '', 'email', 'required')}
     <label class="field"><span>Role</span>
-      <input name="role" list="roleIdeasAdd" value="Viewer" autocomplete="off" placeholder="Type or pick a role" />
-      <datalist id="roleIdeasAdd">
-        <option value="Admin"></option><option value="Manager"></option><option value="Editor"></option><option value="Viewer"></option>
-        ${[...new Set(S.d.users.map((u) => u.role))].filter((r) => r && !['owner', 'admin', 'manager', 'editor', 'viewer'].includes(r)).map((r) => `<option value="${esc(r)}"></option>`).join('')}
-      </datalist>
+      <select name="role" data-pick="role">
+        ${roleChoices().map((r) => `<option value="${esc(r)}"${r === 'viewer' ? ' selected' : ''}>${esc(roleLabel(r))}</option>`).join('')}
+        <option value="__custom__">+ Custom role…</option>
+      </select>
     </label>
-    ${selectField('Department', 'dept', '', [['', '— none —'], ...depts.map((d) => [d, d])])}
+    <label class="field" data-custom-for="role" hidden><span>Custom role title</span>
+      <input name="role_custom" autocomplete="off" placeholder="e.g. Store Keeper" />
+    </label>
+    <label class="field"><span>Department</span>
+      <select name="dept" data-pick="dept">
+        <option value="">— none —</option>
+        ${deptChoices().map((d) => `<option value="${esc(d)}">${esc(d)}</option>`).join('')}
+        <option value="__custom__">+ Custom department…</option>
+      </select>
+    </label>
+    <label class="field" data-custom-for="dept" hidden><span>Custom department name</span>
+      <input name="dept_custom" autocomplete="off" placeholder="e.g. Fabrication" />
+    </label>
     ${field('Temporary password *', 'password', '', 'password', 'required minlength="8"')}
   </div>
   <p class="sub-line" style="margin-top:10px">Share this password with them directly. They can change it from <strong>Your access</strong> after signing in.</p>`;
@@ -1283,7 +1292,10 @@ function addUserModal() {
     wide: true,
     async onSubmit(data) {
       if (!data.email || !data.password) throw new Error('Email and password are required');
-      const res = await api('/api/users', 'POST', data);
+      const role = data.role === '__custom__' ? String(data.role_custom || '').trim() : data.role;
+      const dept = data.dept === '__custom__' ? String(data.dept_custom || '').trim() : data.dept;
+      if (!role) throw new Error('Type a role name');
+      const res = await api('/api/users', 'POST', { ...data, role, dept });
       apply(res);
       closeModal();
       render();
@@ -1327,15 +1339,55 @@ function customRoleModal(sub, name, current) {
   });
 }
 
+function customDeptModal(sub, name, current) {
+  const body = `<div class="form-grid">
+    <label class="field wide"><span>Department name *</span>
+      <input name="dept" value="${esc(current)}" autocomplete="off" placeholder="e.g. Fabrication" required />
+    </label>
+  </div>
+  <p class="sub-line" style="margin-top:10px">Type any department name — it is saved as written and appears in every department list. Access covers the department's stages and dispatch log.</p>`;
+
+  modal({
+    title: `Department — ${name || 'user'}`,
+    sub: 'Free text. Pick a preset from the dropdown or type your own.',
+    body,
+    submit: 'Save department',
+    async onSubmit(data) {
+      const dept = String(data.dept || '').trim();
+      if (!dept) throw new Error('Type a department name');
+      const res = await api('/api/users/' + encodeURIComponent(sub), 'PATCH', { dept });
+      apply(res);
+      closeModal();
+      render();
+      toast(`Department set to ${dept}`, 'ok');
+    },
+  });
+}
+
 function requestAccessModal() {
   const me = S.d.me;
   const ideas = [...new Set([...FULL_ROLES.filter((r) => r !== 'owner'), 'editor', 'viewer', ...(S.d.meta.customRoles || [])])];
   const body = `<div class="form-grid">
     <label class="field"><span>Role you need</span>
-      <input name="role" list="roleAsk" autocomplete="off" placeholder="e.g. Editor, Store Keeper" />
-      <datalist id="roleAsk">${ideas.map((r) => `<option value="${esc(roleLabel(r))}"></option>`).join('')}</datalist>
+      <select name="role" data-pick="role">
+        <option value="">— keep current —</option>
+        ${ideas.map((r) => `<option value="${esc(roleLabel(r))}">${esc(roleLabel(r))}</option>`).join('')}
+        <option value="__custom__">+ Custom role…</option>
+      </select>
     </label>
-    ${selectField('Department', 'dept', '', [['', '— keep current —'], ...S.d.meta.depts.map((d) => [d, d])])}
+    <label class="field" data-custom-for="role" hidden><span>Custom role title</span>
+      <input name="role_custom" autocomplete="off" placeholder="e.g. Store Keeper" />
+    </label>
+    <label class="field"><span>Department</span>
+      <select name="dept" data-pick="dept">
+        <option value="">— keep current —</option>
+        ${deptChoices(me.dept).map((d) => `<option value="${esc(d)}">${esc(d)}</option>`).join('')}
+        <option value="__custom__">+ Custom department…</option>
+      </select>
+    </label>
+    <label class="field" data-custom-for="dept" hidden><span>Custom department name</span>
+      <input name="dept_custom" autocomplete="off" placeholder="e.g. Fabrication" />
+    </label>
     <label class="field wide"><span>What do you need to do?</span>
       <textarea name="note" placeholder="e.g. I mark material receipts for Stores"></textarea>
     </label>
@@ -1349,8 +1401,8 @@ function requestAccessModal() {
     submit: 'Send request',
     wide: true,
     async onSubmit(data) {
-      const role = String(data.role || '').trim();
-      const dept = String(data.dept || '').trim();
+      const role = data.role === '__custom__' ? String(data.role_custom || '').trim() : String(data.role || '').trim();
+      const dept = data.dept === '__custom__' ? String(data.dept_custom || '').trim() : String(data.dept || '').trim();
       if (!role && !dept) throw new Error('Pick a role or a department');
       const res = await api('/api/access-requests', 'POST', { role, dept, note: data.note });
       apply(res);
@@ -1725,6 +1777,14 @@ document.addEventListener('click', (ev) => {
   closePanels();
 });
 
+document.addEventListener('change', (ev) => {
+  const pick = ev.target.closest('[data-pick]');
+  if (!pick) return;
+  const form = pick.closest('form');
+  const box = form && form.querySelector(`[data-custom-for="${pick.dataset.pick}"]`);
+  if (box) box.hidden = pick.value !== '__custom__';
+});
+
 document.addEventListener('change', async (ev) => {
   const roleSel = ev.target.closest('[data-user-role]');
   if (roleSel) {
@@ -1743,6 +1803,13 @@ document.addEventListener('change', async (ev) => {
   }
   const deptSel = ev.target.closest('[data-user-dept]');
   if (deptSel) {
+    if (deptSel.value === '__custom__') {
+      const current = deptSel.dataset.current || '';
+      deptSel.value = current;
+      const u = (S.d.users || []).find((x) => x.sub === deptSel.dataset.userDept) || {};
+      customDeptModal(deptSel.dataset.userDept, u.name || u.email || '', current);
+      return;
+    }
     try {
       const res = await api('/api/users/' + encodeURIComponent(deptSel.dataset.userDept), 'PATCH', { dept: deptSel.value || null });
       apply(res); render(); toast('Department updated', 'ok');

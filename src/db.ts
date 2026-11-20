@@ -51,7 +51,11 @@ export function can(u: User | null, action: Action): boolean {
   // Editor-level access scoped to its own department.
   if (action === 'users' || action === 'settings') return false;
   if (!u.dept) return false;
-  return (DEPT_ACTIONS[u.dept] || []).includes(action);
+  const preset = DEPT_ACTIONS[u.dept];
+  // A department typed by hand has no preset mapping: it gets the stage-level
+  // actions only, never settings, accounts or deletion.
+  if (!preset) return (['des', 'apr', 'mat', 'ps', 'pf', 'qc', 'dsp', 'disp'] as Action[]).includes(action);
+  return preset.includes(action);
 }
 
 /** Everything this user may do, for the UI to enable/disable controls. */

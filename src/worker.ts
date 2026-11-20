@@ -235,6 +235,13 @@ const str = (v: unknown, max = 500): string | null => {
   return s.slice(0, max);
 };
 
+// A department is either a preset or any name an admin typed by hand.
+const deptName = (v: unknown): string | null => {
+  const s = str(v, 60);
+  if (!s) return null;
+  return /^[A-Za-z0-9][A-Za-z0-9 &/._()+-]{0,59}$/.test(s) ? s : null;
+};
+
 const num = (v: unknown): number | null => {
   if (v === null || v === undefined || v === '') return null;
   const n = Number(v);
@@ -307,7 +314,7 @@ async function snapshot(c: any) {
     today,
     meta: {
       stages: STAGE_META,
-      depts: DEPTS,
+      depts: [...new Set([...DEPTS, ...users.map((u) => u.dept).filter((d): d is string => !!d)])],
       roles: ROLES,
       customRoles: [...new Set(users.map((u) => u.role))]
         .filter((r) => r && !ROLES.includes(r)),
@@ -511,7 +518,7 @@ app.post('/api/users', async (c) => {
     return c.json({ error: 'email_taken', message: `${email} already has an account` }, 409);
   }
   const role: Role = roleValue(body.role) || 'viewer';
-  const dept = body.dept && DEPTS.includes(body.dept) ? body.dept : null;
+  const dept = deptName(body.dept);
   const name = str(body.name, 80) || email.split('@')[0];
   const me: User = c.get('user');
   const user = await createUser(c.env.DB, {
@@ -537,7 +544,7 @@ app.patch('/api/users/:sub', async (c) => {
   const me: User = c.get('user');
 
   const role = body.role === undefined ? undefined : (roleValue(body.role) ?? undefined);
-  const dept = body.dept === undefined ? undefined : (body.dept && DEPTS.includes(body.dept) ? body.dept : null);
+  const dept = body.dept === undefined ? undefined : deptName(body.dept);
   const active = body.active === undefined ? undefined : body.active ? 1 : 0;
 
   // The designated super admin keeps full control of the workspace for good.
@@ -579,7 +586,7 @@ app.post('/api/access-requests', async (c) => {
   if (str(body.role, 40) && !askRole) {
     return c.json({ error: 'bad_role', message: 'That role name is not allowed' }, 400);
   }
-  const askDept = body.dept && DEPTS.includes(String(body.dept)) ? String(body.dept) : null;
+  const askDept = deptName(body.dept);
   if (!askRole && !askDept) {
     return c.json({ error: 'nothing_requested', message: 'Pick a role or a department to request' }, 400);
   }
