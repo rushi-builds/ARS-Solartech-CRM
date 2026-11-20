@@ -169,6 +169,27 @@
 
     <section id="view" class="view"></section>
   </main>
+
+  <div class="ai-widget">
+    <section class="ai-panel" id="aiPanel" hidden>
+      <div class="ai-head">
+        <span class="ai-spark">✦</span>
+        <div class="ai-head-txt"><strong>CRM assistant</strong><small>Answers from your live data</small></div>
+        <button class="icon-btn" data-act="ai-toggle" aria-label="Close assistant">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+      </div>
+      <div class="ai-log" id="aiLog"></div>
+      <form class="ai-form" id="aiForm" autocomplete="off">
+        <input id="aiInput" placeholder="Ask about an order, delay or approval…" />
+        <button class="btn primary small" type="submit">Send</button>
+      </form>
+    </section>
+    <button class="ai-fab" data-act="ai-toggle" aria-label="Open the CRM assistant">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 4.6L18.5 9.5 13.9 11.4 12 16l-1.9-4.6L5.5 9.5l4.6-1.9z"/><path d="M18 15l.9 2.1L21 18l-2.1.9L18 21l-.9-2.1L15 18l2.1-.9z"/></svg>
+      <span>Ask AI</span>
+    </button>
+  </div>
 </div>
 
 <div id="drawer" class="drawer"></div>

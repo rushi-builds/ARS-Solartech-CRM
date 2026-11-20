@@ -87,6 +87,14 @@ const ALTERS: string[] = [
   `ALTER TABLE orders ADD COLUMN approval TEXT NOT NULL DEFAULT 'pending'`,
   `ALTER TABLE orders ADD COLUMN approved_by TEXT`,
   `ALTER TABLE orders ADD COLUMN approved_at TEXT`,
+  `ALTER TABLE users ADD COLUMN dept_admin INTEGER NOT NULL DEFAULT 0`,
+  `CREATE TABLE IF NOT EXISTS notifications (
+    id TEXT PRIMARY KEY, at TEXT NOT NULL, channel TEXT NOT NULL, target TEXT,
+    title TEXT, body TEXT, status TEXT NOT NULL DEFAULT 'queued', error TEXT,
+    sub TEXT, order_id TEXT
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_notifications_at ON notifications(at DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_notifications_sub ON notifications(sub)`,
 ];
 
 let ready: Promise<void> | null = null;

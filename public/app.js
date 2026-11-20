@@ -354,6 +354,16 @@ function renderNotifs() {
     </div>`).join(''));
   }
 
+  const escalated = S.d.escalations || [];
+  if (escalated.length) {
+    parts.push(`<div class="pop-section">Escalations · ${escalated.length}</div>`);
+    parts.push(escalated.slice(0, 6).map((e) => `<button class="notif-item red" data-act="open-order" data-id="${esc(e.id)}">
+      <span class="n-dot"></span>
+      <span><span class="n-title">${esc(e.customer)} · ${esc(e.level)}</span>
+      <span class="n-sub">${esc(e.stage)} · ${e.days} day${e.days === 1 ? '' : 's'} late${e.assignee ? ' · ' + esc(e.assignee) : ''}</span></span>
+    </button>`).join(''));
+  }
+
   parts.push('<div class="pop-section">Pipeline alerts</div>');
   parts.push(attention.length
     ? attention.map((a) => {
@@ -370,7 +380,7 @@ function renderNotifs() {
 
   list.innerHTML = parts.join('');
   const badge = $('#notifCount');
-  const total = attention.length + (canDecide ? pending.length : 0) + mine.length + awaiting.length;
+  const total = attention.length + (canDecide ? pending.length : 0) + mine.length + awaiting.length + escalated.length;
   if (badge) { badge.textContent = total; badge.hidden = !total; }
   const sub = $('#notifSub');
   if (sub) {
@@ -985,7 +995,39 @@ function viewUsers() {
       + '<option value="__custom__">+ Custom role…</option>';
   };
 
+  const load = S.d.workload || { rows: [], unassigned: 0 };
+
   return `
+  <div class="card flush" style="margin-bottom:14px">
+    <div class="card-head">
+      <div class="lead">
+        <span class="head-ico grey">${icon('chart')}</span>
+        <div><p class="h-eyebrow">Workload</p><h3>Who is carrying what</h3></div>
+      </div>
+      <span class="hint">${load.unassigned} current stage${load.unassigned === 1 ? '' : 's'} unassigned</span>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Person</th><th>Department</th><th class="num">Open</th><th class="num">Late</th><th class="num">Done · 30d</th></tr></thead>
+        <tbody>
+          ${load.rows.length ? load.rows.map((r) => `<tr>
+            <td>
+              <div class="who">
+                <span class="team-ava">${esc(initials(r.name, r.email))}</span>
+                <span><span class="cust">${esc(r.name)}</span><small class="sub-line">${esc(roleLabel(r.role))}</small></span>
+              </div>
+            </td>
+            <td>${esc(r.dept || '—')}</td>
+            <td class="num">${r.open}</td>
+            <td class="num">${r.late ? `<span class="badge amber">${r.late}</span>` : '0'}</td>
+            <td class="num">${r.done}</td>
+          </tr>`).join('') : '<tr><td colspan="5"><div class="empty">No active accounts yet.</div></td></tr>'}
+        </tbody>
+      </table>
+    </div>
+    <p class="sub-line" style="margin:8px 18px 14px">Counts come from stage assignments: open = still to do, late = past its planned date, done = finished in the last 30 days.</p>
+  </div>
+
   <div class="card flush" style="margin-bottom:14px">
     <div class="card-head">
       <div class="lead">
@@ -1043,7 +1085,7 @@ function viewUsers() {
                 <div class="who">
                   <span class="team-ava">${esc(initials(u.name, u.email))}</span>
                   <span>
-                    <span class="cust">${esc(u.name || 'Unnamed')}${u.sub === S.d.me.sub ? ' <span class="badge blue">you</span>' : ''}</span>
+                    <span class="cust">${esc(u.name || 'Unnamed')}${u.sub === S.d.me.sub ? ' <span class="badge blue">you</span>' : ''}${u.dept_admin ? ' <span class="badge amber">Dept super admin</span>' : ''}</span>
                     <small class="sub-line">${esc(u.email || 'no email on account')}${u.phone ? ' · ' + esc(u.phone) : ''}</small>
                   </span>
                 </div>
@@ -1066,6 +1108,7 @@ function viewUsers() {
               <td class="num">
                 ${canManage
                   ? `<div class="inline" style="justify-content:flex-end">
+                       <button class="btn ghost small" data-act="toggle-dept-admin" data-id="${esc(u.sub)}" data-active="${u.dept_admin ? 1 : 0}" ${u.dept ? '' : 'disabled title="Set a department first"'}>${u.dept_admin ? 'Remove dept admin' : 'Dept super admin'}</button>
                        <button class="btn ghost small" data-act="reset-password" data-id="${esc(u.sub)}" data-name="${esc(u.name || u.email || '')}">Password</button>
                        <button class="btn small ${u.active ? 'ghost' : 'danger'}" data-act="toggle-user" data-id="${esc(u.sub)}" data-active="${u.active}">${u.active ? 'Disable' : 'Enable'}</button>
                      </div>`
@@ -1080,6 +1123,7 @@ function viewUsers() {
       <p class="sub-line" style="margin:0">
         Department mapping: ${S.d.meta.depts.map((d) => esc(d)).join(' · ')}.
         A custom role keeps Editor-level access inside that department.
+        A department super admin gets the advanced Settings page for their department.
       </p>
     </div>
   </div>`;
@@ -1097,7 +1141,15 @@ function viewSettings() {
     ['disp', 'Dispatch log'], ['ovr', 'Overrides'], ['users', 'Users'], ['settings', 'Settings'],
     ['approve', 'Final approval'], ['delete', 'Delete'],
   ];
-  const accessRoles = [['owner', 'Owner · Admin'], ['admin', 'Admin'], ['manager', 'Manager'], ['editor', 'Editor'], ['viewer', 'Viewer']];
+  const presetAccess = ['owner', 'admin', 'manager', 'editor', 'viewer'];
+  const customAccess = Object.keys(access).filter((r) => !presetAccess.includes(r));
+  const accessRoles = [
+    ['owner', 'Owner · Admin'], ['admin', 'Admin'], ['manager', 'Manager'], ['editor', 'Editor'], ['viewer', 'Viewer'],
+    ...customAccess.map((r) => [r, r]),
+  ];
+  const nfy = s.notify || { email: false, whatsapp: false, webhook: '', escalate: 2 };
+  const channels = (S.d.meta && S.d.meta.channels) || {};
+  const outbox = S.d.notifications || [];
 
   return `
   <div class="split">
@@ -1183,7 +1235,8 @@ function viewSettings() {
         <div><p class="h-eyebrow">Access control</p><h3>Who can do what</h3></div>
       </div>
       <div class="inline">
-        <span class="hint">Owner is always full</span>
+        <span class="hint">Owner is always full · add your own role below</span>
+        ${canEdit ? '<button class="btn ghost small" data-act="add-access-role">+ Custom role</button>' : ''}
         ${canEdit ? '<button class="btn primary small" data-act="save-access">Save access rules</button>' : ''}
       </div>
     </div>
@@ -1192,13 +1245,53 @@ function viewSettings() {
         <thead><tr><th>Role</th>${accessCols.map(([, label]) => `<th>${esc(label)}</th>`).join('')}</tr></thead>
         <tbody>
           ${accessRoles.map(([role, label]) => `<tr>
-            <td class="cust">${esc(label)}</td>
+            <td class="cust"><span>${esc(label)}</span>${customAccess.includes(role) ? ` <button class="btn ghost small" data-act="del-access-role" data-role="${esc(role)}" title="Remove this custom role">×</button>` : ''}</td>
             ${accessCols.map(([key]) => `<td><input type="checkbox" data-access="${role}" data-act-key="${key}" ${role === 'owner' || (access[role] || []).includes(key) ? 'checked' : ''} ${role === 'owner' || !canEdit ? 'disabled' : ''} /></td>`).join('')}
           </tr>`).join('')}
         </tbody>
       </table>
     </div>
-    <p class="sub-line" style="margin:6px 18px 16px">Custom roles follow their department: they get the stage columns their department owns — never Users, Settings or final approval. Signing off is the Final approval column.</p>
+    <p class="sub-line" style="margin:6px 18px 16px">Ticks apply to every account with that role. Owner is locked at full control. Without the Users power a department super admin cannot hand out Users, Settings, Delete or final approval.</p>
+  </div>
+
+  <div class="card" style="margin-top:14px">
+    <div class="card-head">
+      <div class="lead">
+        <span class="head-ico grey">${icon('clock')}</span>
+        <div><p class="h-eyebrow">Alerts</p><h3>Email, WhatsApp &amp; escalation</h3></div>
+      </div>
+      <div class="inline">
+        <span class="badge ${channels.email || channels.whatsapp || channels.webhook ? 'green' : 'grey'}">${channels.email || channels.whatsapp || channels.webhook ? 'Channel ready' : 'In-app only'}</span>
+        ${canEdit ? '<button class="btn ghost small" data-act="test-alert">Send test alert</button>' : ''}
+        ${canEdit ? '<button class="btn ghost small" data-act="run-escalations">Run escalation now</button>' : ''}
+      </div>
+    </div>
+    <div class="form-grid">
+      <label class="check"><input type="checkbox" data-notify="email" ${nfy.email ? 'checked' : ''} ${canEdit ? '' : 'disabled'} /> Email to the account address</label>
+      <label class="check"><input type="checkbox" data-notify="whatsapp" ${nfy.whatsapp ? 'checked' : ''} ${canEdit ? '' : 'disabled'} /> WhatsApp to the account mobile</label>
+      <label class="field"><span>Automation webhook (optional)</span>
+        <input type="url" data-notify="webhook" value="${esc(nfy.webhook || '')}" placeholder="https://…" ${canEdit ? '' : 'disabled'} />
+      </label>
+      <label class="field"><span>Escalate after (days late)</span>
+        <input type="number" min="1" max="60" step="1" data-notify="escalate" value="${esc(nfy.escalate || 2)}" ${canEdit ? '' : 'disabled'} />
+      </label>
+    </div>
+    ${canEdit ? '<div class="form-actions" style="justify-content:flex-start"><button class="btn primary" data-act="save-alerts">Save alert settings</button></div>' : ''}
+    <p class="sub-line" style="margin:0 18px 14px">The bell always works. Email needs RESEND_API_KEY on the Worker (optional NOTIFY_FROM); WhatsApp needs WHATSAPP_TOKEN and WHATSAPP_PHONE_ID; the webhook receives JSON <span class="mono">{to, title, text}</span> for any SMS/WhatsApp gateway. Missing keys are recorded as a failed send, never a lost alert.</p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>When</th><th>Channel</th><th>To</th><th>Alert</th><th>Status</th></tr></thead>
+        <tbody>
+          ${outbox.length ? outbox.slice(0, 12).map((n) => `<tr>
+            <td class="mono">${esc(String(n.at).slice(0, 16).replace('T', ' '))}</td>
+            <td>${esc(n.channel)}</td>
+            <td>${esc(n.target || '—')}</td>
+            <td>${esc(n.title || '')}<small class="sub-line">${esc(n.body || '')}</small></td>
+            <td><span class="badge ${n.status === 'sent' ? 'green' : n.status === 'failed' ? 'red' : 'grey'}" title="${esc(n.error || '')}">${esc(n.status)}</span></td>
+          </tr>`).join('') : '<tr><td colspan="5"><div class="empty">No outbox entries yet. Assign a stage or run an escalation.</div></td></tr>'}
+        </tbody>
+      </table>
+    </div>
   </div>`;
 }
 
@@ -1387,6 +1480,7 @@ function addUserModal() {
     <label class="field" data-custom-for="dept" hidden><span>Custom department name</span>
       <input name="dept_custom" autocomplete="off" placeholder="e.g. Fabrication" />
     </label>
+    <label class="check wide"><input type="checkbox" name="dept_admin" value="1" /> Department super admin — opens the advanced Settings page for this department</label>
     ${field('Temporary password *', 'password', '', 'password', 'required minlength="8"')}
   </div>
   <p class="sub-line" style="margin-top:10px">Share this password with them directly. They can change it from <strong>Your access</strong> after signing in.</p>`;
@@ -1469,6 +1563,87 @@ function customDeptModal(sub, name, current) {
       toast(`Department set to ${dept}`, 'ok');
     },
   });
+}
+
+function accessRoleModal() {
+  const body = `<div class="form-grid">
+    <label class="field wide"><span>Role name *</span>
+      <input name="role" autocomplete="off" placeholder="e.g. Store Keeper" required />
+    </label>
+  </div>
+  <p class="sub-line" style="margin-top:10px">Adds a row below Viewer in the matrix. Give it any ticks you want — it then applies to every account with that role.</p>`;
+  modal({
+    title: 'Add custom role to the matrix',
+    sub: 'Type any job title and tick what it may do.',
+    body,
+    submit: 'Add role',
+    async onSubmit(data) {
+      const role = String(data.role || '').trim();
+      if (!role) throw new Error('Type a role name');
+      if (!/^[A-Za-z][A-Za-z0-9 &/._-]{0,39}$/.test(role)) throw new Error('Use letters, digits, spaces or & / . _ -');
+      if (role.toLowerCase() === 'owner') throw new Error('Owner is reserved');
+      const access = { ...(S.d.settings.access || {}) };
+      if (access[role]) throw new Error(`"${role}" is already in the matrix`);
+      access[role] = [];
+      const res = await api('/api/settings', 'PUT', { ...S.d.settings, access });
+      apply(res);
+      closeModal();
+      render();
+      toast(`Custom role ${role} added — tick its access, then save`, 'ok');
+    },
+  });
+}
+
+/* ── floating AI assistant ─────────────────────────────────── */
+const AI = { log: [], busy: false };
+
+function renderAi() {
+  const log = $('#aiLog');
+  if (!log) return;
+  const me = (S.d && S.d.me) || {};
+  if (!AI.log.length) {
+    const first = String(me.name || me.email || 'there').split(/[\s@.]/).filter(Boolean)[0] || 'there';
+    AI.log.push({
+      role: 'assistant',
+      content: `Hi ${first} — ask me about any order, a delay, the approval queue or who is overloaded.`,
+    });
+  }
+  const off = !(S.d && S.d.meta && S.d.meta.aiConfigured);
+  log.innerHTML = (off
+    ? '<div class="ai-note">The assistant key is not set on the Worker yet. Everything else in the CRM works; add OPENAI_API_KEY to switch this on.</div>'
+    : '') + AI.log.map((m) => `<div class="ai-msg ${m.role}${m.error ? ' err' : ''}">${esc(m.content).replace(/\n/g, '<br>')}</div>`).join('')
+    + (AI.busy ? '<div class="ai-msg assistant typing">Thinking…</div>' : '');
+  log.scrollTop = log.scrollHeight;
+}
+
+async function sendAi(text) {
+  const msg = String(text || '').trim();
+  if (!msg || AI.busy) return;
+  AI.log.push({ role: 'user', content: msg });
+  AI.busy = true;
+  renderAi();
+  const input = $('#aiInput');
+  if (input) input.value = '';
+  try {
+    const res = await api('/api/ai/chat', 'POST', { message: msg, history: AI.log.slice(-9, -1) });
+    AI.log.push({ role: 'assistant', content: res.reply || 'No answer returned.' });
+  } catch (e) {
+    AI.log.push({ role: 'assistant', content: e.message || 'The assistant is unavailable.', error: true });
+  } finally {
+    AI.busy = false;
+    renderAi();
+  }
+}
+
+function wireAi() {
+  const form = $('#aiForm');
+  if (!form) return;
+  form.addEventListener('submit', (ev) => {
+    ev.preventDefault();
+    const input = $('#aiInput');
+    sendAi(input ? input.value : '');
+  });
+  renderAi();
 }
 
 function requestAccessModal() {
@@ -1782,6 +1957,52 @@ const ACTIONS = {
       apply(res); render(); toast(active ? 'Account disabled' : 'Account enabled', 'ok');
     } catch (e) { toast(e.message, 'err'); }
   },
+  'toggle-dept-admin': async (el) => {
+    const on = el.dataset.active === '1';
+    try {
+      const res = await api('/api/users/' + encodeURIComponent(el.dataset.id), 'PATCH', { dept_admin: on ? 0 : 1 });
+      apply(res); render();
+      toast(on ? 'Department super admin removed' : 'Department super admin set — advanced Settings is now open for them', 'ok');
+    } catch (e) { toast(e.message, 'err'); }
+  },
+  'add-access-role': () => accessRoleModal(),
+  'del-access-role': async (el) => {
+    const role = el.dataset.role;
+    if (!confirm(`Remove the custom role "${role}" from the access matrix?`)) return;
+    const access = { ...(S.d.settings.access || {}) };
+    delete access[role];
+    try {
+      const res = await api('/api/settings', 'PUT', { ...S.d.settings, access });
+      apply(res); render(); toast('Custom role removed', 'ok');
+    } catch (e) { toast(e.message, 'err'); }
+  },
+  'save-alerts': async () => {
+    const notify = {
+      email: !!($('[data-notify="email"]') || {}).checked,
+      whatsapp: !!($('[data-notify="whatsapp"]') || {}).checked,
+      webhook: (($('[data-notify="webhook"]') || {}).value || '').trim(),
+      escalate: Number((($('[data-notify="escalate"]') || {}).value)) || 2,
+    };
+    try {
+      const res = await api('/api/settings', 'PUT', { ...S.d.settings, notify });
+      apply(res); render(); toast('Alert settings saved', 'ok');
+    } catch (e) { toast(e.message, 'err'); }
+  },
+  'test-alert': async () => {
+    try {
+      const res = await api('/api/notifications/test', 'POST');
+      apply(res); render();
+      toast(res.channels ? `${res.channels} alert(s) queued to you` : 'No channel is enabled yet — turn one on and save first', res.channels ? 'ok' : 'err');
+    } catch (e) { toast(e.message, 'err'); }
+  },
+  'run-escalations': async (el) => {
+    el.disabled = true;
+    try {
+      const res = await api('/api/escalations/run', 'POST');
+      apply(res); render();
+      toast(`${res.orders} overdue order(s) · ${res.alerts} alert(s) queued`, res.alerts ? 'ok' : 'err');
+    } catch (e) { toast(e.message, 'err'); el.disabled = false; }
+  },
   'save-settings': async () => {
     const dur = {};
     $$('[data-set^="dur_"]').forEach((i) => { dur[i.dataset.set.slice(4)] = Number(i.value); });
@@ -1795,6 +2016,7 @@ const ACTIONS = {
       off,
       holidays: S.d.settings.holidays,
       access: S.d.settings.access,
+      notify: S.d.settings.notify,
     };
     try {
       const res = await api('/api/settings', 'PUT', body);
@@ -1890,6 +2112,16 @@ const ACTIONS = {
   },
   import: () => importModal(),
   export: () => { exportOrders(); exportDispatches(); },
+  'ai-toggle': () => {
+    const panel = $('#aiPanel');
+    if (!panel) return;
+    panel.hidden = !panel.hidden;
+    if (!panel.hidden) {
+      renderAi();
+      const input = $('#aiInput');
+      if (input) input.focus();
+    }
+  },
 };
 
 /* ── event wiring ──────────────────────────────────────────── */
@@ -2005,6 +2237,7 @@ document.addEventListener('keydown', (ev) => {
   paintTheme();
   routeFromHash();
   wireAuthForms();
+  wireAi();
   const cached = readCache();
   if (cached) {
     // Render the last snapshot instantly. Only ask the server when it is stale,
