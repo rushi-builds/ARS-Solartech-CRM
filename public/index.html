@@ -4,11 +4,12 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <meta name="color-scheme" content="dark light" />
+<meta name="theme-color" content="#08090c" />
 <title>ARS Solartech · Order to Dispatch</title>
 <link rel="icon" type="image/png" href="favicon.png" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" />
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Sora:wght@500;600;700&display=swap" />
 <script>
   try {
     var t = localStorage.getItem('ars-theme');
@@ -35,11 +36,12 @@
         <li>Working-day forecasts, buffer alerts and plant capacity load</li>
         <li>Department-wise access — every action is checked on the server</li>
       </ul>
-      <p class="gate-foot">ARS Solartech · All Renewable Solutions</p>
+      <p class="gate-foot">Operations workspace · Cloudflare D1</p>
     </aside>
 
     <section class="gate-panel">
       <form id="loginForm" class="gate-form" autocomplete="on">
+        <p class="h-eyebrow">Welcome back</p>
         <h1>Sign in</h1>
         <p class="gate-sub">Continue to the operations workspace.</p>
         <label class="field"><span>Email</span>
@@ -53,8 +55,9 @@
       </form>
 
       <form id="setupForm" class="gate-form" autocomplete="off" hidden>
+        <p class="h-eyebrow">First run</p>
         <h1>Create admin account</h1>
-        <p class="gate-sub">First run — this account manages the workspace.</p>
+        <p class="gate-sub">This account manages the workspace.</p>
         <label class="field"><span>Your name</span>
           <input name="name" type="text" autocomplete="name" placeholder="Your name" />
         </label>
@@ -90,8 +93,10 @@
     <nav id="nav" class="nav"></nav>
 
     <div class="side-foot">
-      <div class="side-status"><span class="pulse"></span> Live workspace</div>
-      <small>Cloudflare D1 · v1.1</small>
+      <div class="side-card">
+        <div class="side-status"><span class="pulse"></span> Live workspace</div>
+        <small>Cloudflare D1 · v1.2</small>
+      </div>
     </div>
   </aside>
 
@@ -103,32 +108,33 @@
       </div>
 
       <div class="top-actions">
-        <span class="pill live" id="todayPill">—</span>
-        <button class="icon-btn" id="refreshBtn" title="Reload data" aria-label="Reload data">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 4v5h-5"/></svg>
-        </button>
-        <span class="top-sep"></span>
-
-        <div class="menu-wrap">
-          <button class="icon-btn" data-act="notif" aria-label="Notifications" aria-haspopup="true">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8.5a6 6 0 1 0-12 0c0 5-2 6.2-2 6.2h16s-2-1.2-2-6.2"/><path d="M10.4 19.4a2 2 0 0 0 3.2 0"/></svg>
-            <span class="count-badge" id="notifCount" hidden>0</span>
+        <div class="seg">
+          <span class="pill live" id="todayPill">—</span>
+          <button class="icon-btn" id="refreshBtn" title="Reload data" aria-label="Reload data">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 4v5h-5"/></svg>
           </button>
-          <div class="popover notif-pop" id="notifPanel" hidden>
-            <div class="pop-head">
-              <strong>Notifications</strong>
-              <span class="hint" id="notifSub"></span>
+        </div>
+
+        <div class="seg">
+          <div class="menu-wrap">
+            <button class="icon-btn" data-act="notif" aria-label="Notifications" aria-haspopup="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8.5a6 6 0 1 0-12 0c0 5-2 6.2-2 6.2h16s-2-1.2-2-6.2"/><path d="M10.4 19.4a2 2 0 0 0 3.2 0"/></svg>
+              <span class="count-badge" id="notifCount" hidden>0</span>
+            </button>
+            <div class="popover notif-pop" id="notifPanel" hidden>
+              <div class="pop-head">
+                <strong>Notifications</strong>
+                <span class="hint" id="notifSub"></span>
+              </div>
+              <div class="pop-body" id="notifList"></div>
+              <div class="pop-foot"><a href="#/activity" data-act="close-panels">Open activity log</a></div>
             </div>
-            <div class="pop-body" id="notifList"></div>
-            <div class="pop-foot"><a href="#/activity" data-act="close-panels">Open activity log</a></div>
+          </div>
+
+          <div class="menu-wrap">
+            <button class="icon-btn" data-act="theme" id="themeBtn" aria-label="Switch colour theme" title="Switch theme"></button>
           </div>
         </div>
-
-        <div class="menu-wrap">
-          <button class="icon-btn" data-act="theme" id="themeBtn" aria-label="Switch colour theme" title="Switch theme"></button>
-        </div>
-
-        <span class="top-sep"></span>
 
         <div class="menu-wrap">
           <button class="account-chip" data-act="account" aria-haspopup="true">

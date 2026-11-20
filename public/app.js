@@ -269,7 +269,11 @@ function render() {
     settings: viewSettings,
     activity: viewActivity,
   })[S.view]();
-  $('#view').innerHTML = html;
+  const viewEl = $('#view');
+  viewEl.innerHTML = html;
+  viewEl.classList.remove('enter');
+  void viewEl.offsetWidth;
+  viewEl.classList.add('enter');
 
   if (S.open) openDrawer(S.open, true);
 }
@@ -317,6 +321,14 @@ function roleLabel(role) {
   return ({ owner: 'Admin', admin: 'Admin', editor: 'Editor', viewer: 'Viewer' })[role] || role || 'Viewer';
 }
 
+function greeting() {
+  const me = (S.d && S.d.me) || {};
+  const first = String(me.name || me.email || '').split(/[\s@.]/).filter(Boolean)[0] || 'there';
+  const h = new Date().getHours();
+  const part = h < 12 ? 'Good morning' : h < 17 ? 'Good afternoon' : 'Good evening';
+  return `${part}, ${esc(first)}`;
+}
+
 function ragBadge(rag) {
   const cls = rag === 'RED' ? 'red' : rag === 'AMBER' ? 'amber' : rag === 'GREEN' ? 'green' : 'grey';
   const label = ({ RED: 'Red · late', AMBER: 'Amber', GREEN: 'Green', CLOSED: 'Closed', 'NOT PLANNED': 'Not planned' })[rag] || rag;
@@ -332,8 +344,24 @@ function viewDashboard() {
   const attention = d.dashboard.attention;
 
   const top = stages.reduce((a, b) => (b.count > a.count ? b : a), stages[0] || { count: 0, stage: '—' });
+  const heroStats = [
+    ['Open orders', String(k.active)],
+    ['Balance', `${n1(k.balanceMt)} MT`],
+    ['Late stages', String(k.overdue)],
+  ];
 
   return `
+  <section class="hero">
+    <div class="hero-copy">
+      <p class="h-eyebrow">Operations control tower</p>
+      <h2 class="h-title">${greeting()}</h2>
+      <p class="h-sub">${k.active} live order${k.active === 1 ? '' : 's'} · bottleneck at <strong>${esc(top.stage || '—')}</strong> · ${n1(k.balanceMt)} MT still to dispatch</p>
+    </div>
+    <div class="h-stats">
+      ${heroStats.map(([l, v]) => `<div class="h-stat"><span>${esc(l)}</span><strong>${esc(v)}</strong></div>`).join('')}
+    </div>
+  </section>
+
   <div class="grid cols-4">
     ${kpiTile('Active orders', k.active, `${n1(k.activeMt)} MT in the pipeline`, 'accent', 'open orders')}
     ${kpiTile('Late', k.red, 'forecast misses the due date', 'red', 'red orders')}
