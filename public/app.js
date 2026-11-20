@@ -344,6 +344,7 @@ function viewDashboard() {
   const attention = d.dashboard.attention;
 
   const top = stages.reduce((a, b) => (b.count > a.count ? b : a), stages[0] || { count: 0, stage: '—' });
+  const peak = Math.max(1, ...stages.map((s) => s.count));
   const heroStats = [
     ['Open orders', String(k.active)],
     ['Balance', `${n1(k.balanceMt)} MT`],
@@ -369,83 +370,103 @@ function viewDashboard() {
     ${kpiTile('On track', k.green, `${k.closed} dispatched / closed`, 'green', 'green orders')}
   </div>
 
+  <div class="card" style="margin-top:14px">
+      <div class="card-head">
+        <div class="lead">
+          <span class="head-ico grey">${icon('chart')}</span>
+          <div><p class="h-eyebrow">Flow</p><h3>Pipeline by department</h3></div>
+        </div>
+        <span class="hint">${k.active} active · bottleneck: ${esc(top.stage || '—')}</span>
+      </div>
+      <div class="flow">
+        ${stages.map((s) => {
+          const w = clampPct((s.count / peak) * 100);
+          return `<button class="flow-node ${s.count ? 'active' : ''}" type="button" data-act="open-stage" data-stage="${s.no}" title="Show ${esc(s.stage)} orders">
+            <span class="fn-top"><span class="fn-no">${s.no}</span><span class="fn-count">${s.count}</span></span>
+            <span class="fn-name">${esc(s.stage)}</span>
+            <span class="fn-dept">${esc(s.dept)}</span>
+            <span class="fn-bar"><i style="width:${w}%"></i></span>
+            <span class="fn-mt">${n1(s.mt)} MT${s.head ? ' · ' + esc(s.head) : ''}</span>
+          </button>`;
+        }).join('')}
+      </div>
+  </div>
+
   <div class="split" style="margin-top:14px">
     <div class="card">
       <div class="card-head">
-        <h3>Pipeline by department</h3>
-        <span class="hint">${k.active} active · bottleneck: ${esc(top.stage || '—')}</span>
-      </div>
-      <div class="stage-list">
-        ${stages.map((s) => `
-          <div class="stage-row ${s.count ? 'current' : ''}">
-            <div class="stage-no">${s.no}</div>
-            <div>
-              <div class="stage-name">${esc(s.stage)}</div>
-              <div class="stage-meta">${esc(s.dept)}${s.head ? ' · ' + esc(s.head) : ''}</div>
-            </div>
-            <div style="text-align:right">
-              <div class="cust">${s.count} <span class="sub-line" style="display:inline;margin:0">order${s.count === 1 ? '' : 's'}</span></div>
-              <div class="sub-line">${n1(s.mt)} MT</div>
-            </div>
-          </div>`).join('')}
-      </div>
-    </div>
-
-    <div class="card">
-      <div class="card-head">
-        <h3>Needs attention</h3>
+        <div class="lead">
+          <span class="head-ico grey">${icon('clock')}</span>
+          <div><p class="h-eyebrow">Attention</p><h3>Needs attention</h3></div>
+        </div>
         <span class="hint">${k.sopAlerts} SOP flag${k.sopAlerts === 1 ? '' : 's'}</span>
       </div>
       ${attention.length ? `
-      <div class="table-wrap"><table>
-        <thead><tr><th>Order</th><th>Waiting on</th><th class="num">Days</th></tr></thead>
-        <tbody>
-          ${attention.map((a) => `
-            <tr class="clickable" data-act="open-order" data-id="${esc(a.id)}">
-              <td><span class="cust">${esc(a.customer || a.id)}</span><small class="sub-line">${esc(a.id)}</small></td>
-              <td>${esc(a.stage)}<small class="sub-line">${esc(a.withWhom)}</small></td>
-              <td class="num">${a.daysOverdue > 0 ? `<span class="badge red">+${a.daysOverdue}d</span>` : ragBadge(a.rag)}</td>
-            </tr>`).join('')}
-        </tbody>
-      </table></div>` : `<div class="empty">Nothing is late. Every stage is inside its planned date.</div>`}
+      <div class="risk-list">
+        ${attention.map((a) => `
+          <div class="risk-row ${a.daysOverdue > 0 || a.rag === 'RED' ? 'bad' : 'warn'}" data-act="open-order" data-id="${esc(a.id)}" title="${esc(a.id)} · ${esc(a.stage)}">
+            <span class="rail"></span>
+            <span class="risk-main">
+              <span class="risk-name">${esc(a.customer || a.id)}</span>
+              <span class="risk-meta">${esc(a.stage)}${a.withWhom ? ' · ' + esc(a.withWhom) : ''}</span>
+            </span>
+            <span class="risk-end">
+              ${a.daysOverdue > 0 ? `<b class="risk-days">+${a.daysOverdue}d</b>` : ragBadge(a.rag)}
+              <small>${fmt(a.forecast)}</small>
+            </span>
+          </div>`).join('')}
+      </div>` : `<div class="empty">Nothing is late. Every stage is inside its planned date.</div>`}
+    </div>
+  </div>
+
+    <div class="col-stack">
+    <div class="card tight">
+      <div class="card-head"><div class="lead"><span class="head-ico">${icon('box')}</span><div><p class="h-eyebrow">Shortcuts</p><h3>Quick actions</h3></div></div></div>
+      <div class="action-grid">
+        <button class="action-tile" data-act="new-order" ${cap('order') ? '' : 'disabled'}>
+          <span class="ai">${icon('box')}</span><span><strong>New order</strong><small>From a customer PO</small></span>
+        </button>
+        <button class="action-tile" data-act="new-dispatch" ${cap('disp') ? '' : 'disabled'}>
+          <span class="ai">${icon('truck')}</span><span><strong>Dispatch entry</strong><small>Batch, vehicle, invoice</small></span>
+        </button>
+        <button class="action-tile" data-act="import">
+          <span class="ai">${icon('chart')}</span><span><strong>Import sheet</strong><small>Excel or CSV</small></span>
+        </button>
+        <button class="action-tile" data-act="export">
+          <span class="ai">${icon('clock')}</span><span><strong>Export</strong><small>Orders + dispatches</small></span>
+        </button>
+      </div>
+      <p class="sub-line" style="margin-top:12px">Balance to dispatch: <strong style="color:var(--text)">${n1(k.balanceMt)} MT</strong> across ${k.active} open orders.</p>
+    </div>
+    <div class="card tight">
+      <div class="card-head"><div class="lead"><span class="head-ico grey">${icon('users')}</span><div><p class="h-eyebrow">Signed in as</p><h3>Your access</h3></div></div><span class="hint">${roleLabel(S.d.me.role)}</span></div>
+      <div class="inline">
+        ${Object.entries(S.d.capabilities).filter(([, v]) => v).map(([a]) => `<span class="badge blue">${esc(actionLabel(a))}</span>`).join('') || '<span class="sub-line">View only — ask an admin for a department.</span>'}
+      </div>
+    </div>
     </div>
   </div>
 
   <div class="card" style="margin-top:14px">
     <div class="card-head">
-      <h3>Capacity · next 8 weeks</h3>
+      <div class="lead">
+        <span class="head-ico grey">${icon('chart')}</span>
+        <div><p class="h-eyebrow">Load</p><h3>Capacity · next 8 weeks</h3></div>
+      </div>
       <a class="btn ghost small" href="#/capacity">Open plan</a>
     </div>
-    <div class="cap-grid">
-      ${cap8.map((w) => capRow(w)).join('')}
-    </div>
-  </div>
-
-  <div class="grid cols-2" style="margin-top:14px">
-    <div class="card tight">
-      <div class="card-head"><h3>Quick actions</h3></div>
-      <div class="inline">
-        <button class="btn primary small" data-act="new-order" ${cap('order') ? '' : 'disabled'}>+ New order</button>
-        <button class="btn small" data-act="new-dispatch" ${cap('disp') ? '' : 'disabled'}>+ Dispatch entry</button>
-        <button class="btn small" data-act="import">Import from Excel / CSV</button>
-        <button class="btn ghost small" data-act="export">Export CSV</button>
-      </div>
-      <p class="sub-line" style="margin-top:12px">Balance to dispatch: <strong style="color:var(--text)">${n1(k.balanceMt)} MT</strong> across ${k.active} open orders.</p>
-    </div>
-    <div class="card tight">
-      <div class="card-head"><h3>Your access</h3><span class="hint">${roleLabel(S.d.me.role)}</span></div>
-      <div class="inline">
-        ${Object.entries(S.d.capabilities).filter(([, v]) => v).map(([a]) => `<span class="badge blue">${esc(actionLabel(a))}</span>`).join('') || '<span class="sub-line">View only — ask an admin for a department.</span>'}
-      </div>
+    <div class="week-grid">
+      ${cap8.map((w) => capTile(w)).join('')}
     </div>
   </div>`;
 }
 
-function kpiTile(label, value, foot, tone) {
+function kpiTile(label, value, foot, tone, hint) {
   return `<div class="card kpi ${tone}">
-    <div class="k-label">${esc(label)}</div>
+    <div class="k-top"><span class="k-label">${esc(label)}</span><span class="k-dot"></span></div>
     <div class="k-value">${value}</div>
     <div class="k-foot">${esc(foot)}</div>
+    ${hint ? `<span class="k-tag">${esc(hint)}</span>` : ''}
   </div>`;
 }
 
@@ -457,14 +478,14 @@ function actionLabel(a) {
   })[a] || a;
 }
 
-function capRow(w) {
+function capTile(w) {
   const pct = clampPct(w.utilisation * 100);
-  const cls = w.status === 'OVERLOADED' ? 'red' : w.status === 'HIGH' ? 'amber' : '';
-  return `<div class="cap-row">
-    <span class="lbl">${fmt(w.start)} – ${fmt(w.end)}</span>
-    <span class="bar ${cls}"><i style="width:${pct}%"></i></span>
-    <span class="val">${pct}% · ${n1(w.loadMt)}/${n1(w.capacityMt)} MT</span>
-    <span class="val hide-sm">${w.status === 'OVERLOADED' ? '<span class="badge red">Over</span>' : w.status === 'HIGH' ? '<span class="badge amber">High</span>' : '<span class="badge green">OK</span>'}</span>
+  const cls = w.status === 'OVERLOADED' ? 'over' : w.status === 'HIGH' ? 'warn' : '';
+  return `<div class="week-tile ${cls}" title="${fmt(w.start)} – ${fmt(w.end)} · ${pct}% utilised">
+    <span class="wk">${fmt(w.start).replace(/ \d{2}$/, '')}</span>
+    <b>${pct}%</b>
+    <div class="wt-bar"><i style="width:${pct}%"></i></div>
+    <em>${n1(w.loadMt)}/${n1(w.capacityMt)} MT</em>
   </div>`;
 }
 
@@ -486,7 +507,8 @@ function viewOrders() {
   const mt = open.reduce((s, o) => s + (o.mt || 0), 0);
 
   return `
-  <div class="filters">
+  <div class="card flush">
+    <div class="toolbar">
     <input class="search" id="q" placeholder="Search customer, project, order no…" value="${esc(S.q)}" />
     <select id="fStatus">
       ${opt('all', 'All status', S.status)}${opt('open', 'Open', S.status)}${opt('closed', 'Closed', S.status)}${opt('cancelled', 'Cancelled', S.status)}
@@ -504,12 +526,21 @@ function viewOrders() {
     <button class="btn ghost small" data-act="import">Import</button>
     <button class="btn ghost small" data-act="export">Export</button>
     <button class="btn primary small" data-act="new-order" ${cap('order') ? '' : 'disabled'}>+ New order</button>
-  </div>
+    </div>
 
-  <div class="card">
     <div class="card-head">
-      <h3>${rows.length} order${rows.length === 1 ? '' : 's'}</h3>
-      <span class="hint">${n1(mt)} MT still to dispatch</span>
+      <div class="lead">
+        <span class="head-ico">${icon('box')}</span>
+        <div>
+          <p class="h-eyebrow">Order book</p>
+          <h3>${rows.length} order${rows.length === 1 ? '' : 's'}</h3>
+        </div>
+      </div>
+      <div class="strip">
+        <span><b>${n1(mt)}</b> MT to dispatch</span>
+        <span><b>${open.length}</b> open</span>
+        <span><b>${rows.filter((o) => o.live.rag === 'RED').length}</b> red</span>
+      </div>
     </div>
     <div class="table-wrap">
       <table>
@@ -538,18 +569,26 @@ function bufferCell(o) {
   return `<span class="badge green">${b}d</span>`;
 }
 
+function stageDots(o) {
+  const done = clampPct((o.live.progress / 100) * 7) / 100 * 7;
+  const n = Math.round(done);
+  return `<span class="dots" title="${n} of 7 milestones done">${
+    Array.from({ length: 7 }, (_, i) => `<i class="${i < n ? 'on' : i === n && o.live.stageNo <= 6 ? 'now' : ''}"></i>`).join('')
+  }</span>`;
+}
+
 function orderRow(o) {
   const pct = clampPct(o.live.progress);
   return `<tr class="clickable" data-act="open-order" data-id="${esc(o.id)}">
-    <td><span class="mono">${esc(o.id)}</span>${o.live.sopFlag ? '<small class="sub-line" style="color:#ffb47a">SOP flag</small>' : ''}</td>
+    <td><div class="cell-id"><span class="mono">${esc(o.id)}</span>${stageDots(o)}</div>${o.live.sopFlag ? '<small class="sub-line" style="color:#ffb47a">SOP flag</small>' : ''}</td>
     <td><span class="cust">${esc(o.customer || '—')}</span><small class="sub-line">${esc(o.project || '')}</small></td>
-    <td class="num">${n1(o.mt)}</td>
+    <td class="num">${n1(o.mt)}<small class="sub-line" style="text-align:right">MT</small></td>
     <td>${fmt(o.conf_date)}</td>
     <td>${fmt(o.due_date)}</td>
-    <td>${esc(o.live.stage)}<small class="sub-line">${esc(o.live.dept)}${o.live.head ? ' · ' + esc(o.live.head) : ''}</small></td>
+    <td><span class="cust">${esc(o.live.stage)}</span><small class="sub-line">${esc(o.live.dept)}${o.live.head ? ' · ' + esc(o.live.head) : ''}</small></td>
     <td>${fmt(o.live.forecastDispatch)}</td>
     <td class="num">${bufferCell(o)}</td>
-    <td><div class="bar blue" style="width:70px"><i style="width:${pct}%"></i></div></td>
+    <td><span class="prog"><span class="bar blue"><i style="width:${pct}%"></i></span><b>${pct}%</b></span></td>
     <td>${ragBadge(o.live.rag)}</td>
   </tr>`;
 }
@@ -687,10 +726,18 @@ function viewDispatch() {
     ${kpiTile('Orders covered', new Set(rows.map((r) => r.order_id)).size, 'at least one dispatch', 'blue')}
   </div>
 
-  <div class="card" style="margin-top:14px">
+  <div class="card flush" style="margin-top:14px">
     <div class="card-head">
-      <h3>Dispatch log</h3>
+      <div class="lead">
+        <span class="head-ico grey">${icon('truck')}</span>
+        <div><p class="h-eyebrow">Logistics</p><h3>Dispatch log</h3></div>
+      </div>
       <div class="inline">
+        <div class="strip">
+          <span><b>${rows.length}</b> entries</span>
+          <span><b>${n1(mt)}</b> MT</span>
+          <span><b>${pending}</b> pending</span>
+        </div>
         <button class="btn ghost small" data-act="export">Export CSV</button>
         <button class="btn primary small" data-act="new-dispatch" ${cap('disp') ? '' : 'disabled'}>+ Dispatch entry</button>
       </div>
@@ -739,9 +786,12 @@ function viewCapacity() {
     ${kpiTile('Daily capacity', n1(S.d.settings.cap), 'MT per working day', 'blue')}
   </div>
 
-  <div class="card" style="margin-top:14px">
+  <div class="card flush" style="margin-top:14px">
     <div class="card-head">
-      <h3>Weekly load vs capacity</h3>
+      <div class="lead">
+        <span class="head-ico grey">${icon('chart')}</span>
+        <div><p class="h-eyebrow">Plant</p><h3>Weekly load vs capacity</h3></div>
+      </div>
       <span class="hint">Working-day overlap only (weekends and holidays excluded)</span>
     </div>
     <div class="table-wrap">
@@ -759,7 +809,7 @@ function viewCapacity() {
               <td class="num">${w.workingDays}</td>
               <td class="num">${n1(w.capacityMt)}</td>
               <td class="num">${n1(w.loadMt)}</td>
-              <td><div class="inline"><span class="bar ${cls}" style="width:110px"><i style="width:${pct}%"></i></span><span class="mono">${pct}%</span></div></td>
+              <td><span class="prog"><span class="bar ${cls}" style="width:110px"><i style="width:${pct}%"></i></span><b>${pct}%</b></span></td>
               <td class="num">${n1(w.freeMt)}</td>
               <td>${w.status === 'OVERLOADED' ? '<span class="badge red">Overloaded</span>' : w.status === 'HIGH' ? '<span class="badge amber">High</span>' : '<span class="badge green">OK</span>'}</td>
             </tr>`;
@@ -775,68 +825,113 @@ function viewUsers() {
   const users = S.d.users;
   const canManage = cap('users');
   const depts = S.d.meta.depts;
-  const admin = users.find((u) => u.role === 'owner' || u.role === 'admin');
+  const owner = users.find((u) => u.role === 'owner');
+  const presets = ['admin', 'editor', 'viewer'];
+  const customs = [...new Set(users.map((u) => u.role))]
+    .filter((r) => r && r !== 'owner' && !presets.includes(r));
+
+  const roleList = (current) => {
+    const list = presets.slice();
+    for (const r of customs) if (!list.includes(r)) list.push(r);
+    if (current && current !== 'owner' && !list.includes(current)) list.push(current);
+    return list.map((r) => `<option value="${esc(r)}" ${r === current ? 'selected' : ''}>${esc(roleLabel(r))}</option>`).join('')
+      + '<option value="__custom__">+ Custom role…</option>';
+  };
 
   return `
-  <div class="card" style="margin-bottom:14px">
-    <div class="card-head">
-      <h3>How a person gets access</h3>
-      <span class="hint">${users.length} account${users.length === 1 ? '' : 's'}</span>
+  <div class="grid cols-2" style="margin-bottom:14px">
+    <div class="card">
+      <div class="card-head">
+        <div class="lead">
+          <span class="head-ico grey">${icon('users')}</span>
+          <div><p class="h-eyebrow">Access model</p><h3>How a person gets in</h3></div>
+        </div>
+        <span class="hint">${users.length} account${users.length === 1 ? '' : 's'}</span>
+      </div>
+      <ol class="steps">
+        <li><b>Admin adds them</b><span>Email plus a temporary password — nothing is public.</span></li>
+        <li><b>They sign in</b><span>Same URL, their own credentials.</span></li>
+        <li><b>Department + role</b><span>Set on the row; applied on their next click.</span></li>
+        <li><b>The server enforces it</b><span>Every action is re-checked on the Worker, not in the browser.</span></li>
+      </ol>
     </div>
-    <div class="grid cols-4">
-      <div><div class="k" style="font-size:11px;color:var(--dim);font-weight:700">1 · Admin adds them</div><p class="sub-line" style="margin-top:5px">Click <strong>Add user</strong> and set an email + temporary password.</p></div>
-      <div><div class="k" style="font-size:11px;color:var(--dim);font-weight:700">2 · They sign in</div><p class="sub-line" style="margin-top:5px">They open the site with that email and password.</p></div>
-      <div><div class="k" style="font-size:11px;color:var(--dim);font-weight:700">3 · Department + role</div><p class="sub-line" style="margin-top:5px">Set below — changes apply on their next click.</p></div>
-      <div><div class="k" style="font-size:11px;color:var(--dim);font-weight:700">4 · Enforced</div><p class="sub-line" style="margin-top:5px">Server checks every action against the department.</p></div>
+    <div class="card">
+      <div class="card-head">
+        <div class="lead">
+          <span class="head-ico">${icon('gear')}</span>
+          <div><p class="h-eyebrow">Roles</p><h3>What each role can do</h3></div>
+        </div>
+      </div>
+      <div class="role-cat">
+        <div class="role-card"><b>Admin</b><span>Everything: orders, settings, users and delete.</span></div>
+        <div class="role-card"><b>Editor</b><span>Only their department's stages and dispatch log.</span></div>
+        <div class="role-card"><b>Viewer</b><span>Read only across the workspace.</span></div>
+        ${customs.map((r) => `<div class="role-card custom"><b>${esc(r)}</b><span>Custom role · works like Editor, limited to the assigned department.</span></div>`).join('')}
+      </div>
+      <p class="sub-line" style="margin-top:11px">Choose <strong>+ Custom role…</strong> on any row and type your own title — Store Keeper, Dispatch Lead, QC Engineer. Access stays department-scoped.</p>
     </div>
   </div>
 
-  <div class="card">
+  <div class="card flush">
     <div class="card-head">
-      <h3>Accounts</h3>
+      <div class="lead">
+        <span class="head-ico">${icon('users')}</span>
+        <div><p class="h-eyebrow">Directory</p><h3>Accounts</h3></div>
+      </div>
       <div class="inline">
-        <span class="hint">${admin ? 'Admin: ' + esc(admin.name || admin.email || admin.sub) : 'No admin yet'}</span>
+        <span class="hint">${owner ? 'Owner: ' + esc(owner.name || owner.email || owner.sub) : 'No owner account'}</span>
         ${canManage ? '<button class="btn primary small" data-act="add-user">+ Add user</button>' : ''}
       </div>
     </div>
     <div class="table-wrap">
       <table>
-        <thead><tr><th>Person</th><th>Department</th><th>Role</th><th class="num">Active</th></tr></thead>
+        <thead><tr><th>Person</th><th>Department</th><th>Role</th><th>Status</th><th class="num">Actions</th></tr></thead>
         <tbody>
-          ${users.map((u) => `
-            <tr>
+          ${users.map((u) => {
+            const isOwner = u.role === 'owner';
+            return `<tr>
               <td>
-                <span class="cust">${esc(u.name || 'Unnamed')}${u.sub === S.d.me.sub ? ' <span class="badge blue">you</span>' : ''}</span>
-                <small class="sub-line">${esc(u.email || 'no email on account')}</small>
+                <div class="who">
+                  <span class="team-ava">${esc(initials(u.name, u.email))}</span>
+                  <span>
+                    <span class="cust">${esc(u.name || 'Unnamed')}${u.sub === S.d.me.sub ? ' <span class="badge blue">you</span>' : ''}</span>
+                    <small class="sub-line">${esc(u.email || 'no email on account')}</small>
+                  </span>
+                </div>
               </td>
               <td>
-                <select data-user-dept="${esc(u.sub)}" ${canManage ? '' : 'disabled'}>
+                <select class="role-input" data-user-dept="${esc(u.sub)}" ${canManage ? '' : 'disabled'}>
                   <option value="">— none —</option>
                   ${depts.map((d) => opt(d, d, u.dept)).join('')}
                 </select>
               </td>
               <td>
-                <select data-user-role="${esc(u.sub)}" ${canManage ? '' : 'disabled'}>
-                  ${S.d.meta.roles.filter((r) => r !== 'owner').map((r) => opt(r, 'Admin', u.role === 'owner' ? 'admin' : u.role)).join('')}
-                </select>
+                ${isOwner
+                  ? '<span class="badge amber">Admin · owner</span>'
+                  : `<select class="role-input" data-user-role="${esc(u.sub)}" data-current="${esc(u.role)}" ${canManage ? '' : 'disabled'}>
+                       ${roleList(u.role)}
+                     </select>`}
               </td>
+              <td><span class="badge ${u.active ? 'green' : 'grey'}">${u.active ? 'Enabled' : 'Disabled'}</span></td>
               <td class="num">
                 ${canManage
                   ? `<div class="inline" style="justify-content:flex-end">
                        <button class="btn ghost small" data-act="reset-password" data-id="${esc(u.sub)}" data-name="${esc(u.name || u.email || '')}">Password</button>
-                       <button class="btn small ${u.active ? 'ghost' : 'danger'}" data-act="toggle-user" data-id="${esc(u.sub)}" data-active="${u.active}">${u.active ? 'Enabled' : 'Disabled'}</button>
+                       <button class="btn small ${u.active ? 'ghost' : 'danger'}" data-act="toggle-user" data-id="${esc(u.sub)}" data-active="${u.active}">${u.active ? 'Disable' : 'Enable'}</button>
                      </div>`
-                  : `<span class="badge ${u.active ? 'green' : 'grey'}">${u.active ? 'Enabled' : 'Disabled'}</span>`}
+                  : '<span class="sub-line">—</span>'}
               </td>
-            </tr>`).join('')}
+            </tr>`;
+          }).join('')}
         </tbody>
       </table>
     </div>
-    <p class="sub-line" style="margin-top:12px">
-      Roles: <strong>Admin</strong> everything · <strong>Editor</strong> only their department's stages ·
-      <strong>Viewer</strong> read only. Department mapping:
-      ${S.d.meta.depts.map((d) => `${esc(d)}`).join(' · ')}.
-    </p>
+    <div style="padding:13px 18px;border-top:1px solid var(--line);background:var(--surface-2)">
+      <p class="sub-line" style="margin:0">
+        Department mapping: ${S.d.meta.depts.map((d) => esc(d)).join(' · ')}.
+        A custom role keeps Editor-level access inside that department.
+      </p>
+    </div>
   </div>`;
 }
 
@@ -850,7 +945,7 @@ function viewSettings() {
   <div class="split">
     <div style="display:grid;gap:14px">
       <div class="card">
-        <div class="card-head"><h3>Planning durations</h3><span class="hint">working days</span></div>
+        <div class="card-head"><div class="lead"><span class="head-ico">${icon('clock')}</span><div><p class="h-eyebrow">Planning</p><h3>Durations</h3></div></div><span class="hint">working days</span></div>
         <div class="form-grid">
           ${numField('Design & BOM', 'dur_des', s.dur.des, canEdit)}
           ${numField('Drawing approval', 'dur_apr', s.dur.apr, canEdit)}
@@ -864,7 +959,7 @@ function viewSettings() {
       </div>
 
       <div class="card">
-        <div class="card-head"><h3>Working days</h3><span class="hint">excluded from every calculation</span></div>
+        <div class="card-head"><div class="lead"><span class="head-ico grey">${icon('chart')}</span><div><p class="h-eyebrow">Calendar</p><h3>Working days</h3></div></div><span class="hint">excluded from every calculation</span></div>
         <div class="check-row">
           ${DAYS.map((d, i) => `<label class="check"><input type="checkbox" data-off="${i}" ${s.off.includes(i) ? 'checked' : ''} ${canEdit ? '' : 'disabled'} /> ${d}</label>`).join('')}
         </div>
@@ -879,7 +974,7 @@ function viewSettings() {
       </div>
 
       <div class="card">
-        <div class="card-head"><h3>Department heads</h3><span class="hint">shown on the order drawer</span></div>
+        <div class="card-head"><div class="lead"><span class="head-ico grey">${icon('users')}</span><div><p class="h-eyebrow">Owners</p><h3>Department heads</h3></div></div><span class="hint">shown on the order drawer</span></div>
         <div class="table-wrap"><table>
           <thead><tr><th>Department</th><th>Person</th><th>Mobile</th><th>Scope</th></tr></thead>
           <tbody>
@@ -897,7 +992,7 @@ function viewSettings() {
       </div>
 
       <div class="card">
-        <div class="card-head"><h3>Data & backup</h3></div>
+        <div class="card-head"><div class="lead"><span class="head-ico grey">${icon('box')}</span><div><p class="h-eyebrow">Data</p><h3>Backup &amp; import</h3></div></div></div>
         <div class="inline">
           <button class="btn small" data-act="export">Export orders CSV</button>
           <button class="btn ghost small" data-act="import" ${cap('order') ? '' : 'disabled'}>Import orders</button>
@@ -912,7 +1007,7 @@ function viewSettings() {
     </div>
 
     <div class="card">
-      <div class="card-head"><h3>The SOP</h3></div>
+      <div class="card-head"><div class="lead"><span class="head-ico grey">${icon('gear')}</span><div><p class="h-eyebrow">Reference</p><h3>The SOP</h3></div></div></div>
       <div class="stage-list">
         <div class="stage-row"><div class="stage-no">1</div><div><div class="stage-name">Design &amp; BOM</div><div class="stage-meta">${s.dur.des} working days after confirmation</div></div></div>
         <div class="stage-row"><div class="stage-no">2</div><div><div class="stage-name">Drawing approval + procurement</div><div class="stage-meta">parallel · approval ${s.dur.apr}d, materials ${s.dur.pro}d</div></div></div>
@@ -933,14 +1028,22 @@ function numField(label, name, value, enabled, step) {
 /* ── activity ──────────────────────────────────────────────── */
 function viewActivity() {
   const rows = S.d.activity || [];
-  return `<div class="card">
-    <div class="card-head"><h3>Recent activity</h3><span class="hint">last ${rows.length} events</span></div>
-    ${rows.length ? `<div class="feed">${rows.map((e) => `
-      <div class="feed-row">
-        <div class="t">${esc(String(e.at).slice(0, 16).replace('T', ' '))}</div>
-        <div class="d"><strong>${esc(e.actor_name || 'System')}</strong> ${esc(e.detail || e.action)}
-          ${e.entity_id ? `<span class="mono" style="color:var(--dim)"> · ${esc(e.entity_id)}</span>` : ''}</div>
+  return `<div class="card flush">
+    <div class="card-head">
+      <div class="lead">
+        <span class="head-ico grey">${icon('clock')}</span>
+        <div><p class="h-eyebrow">Audit trail</p><h3>Recent activity</h3></div>
+      </div>
+      <span class="hint">last ${rows.length} events</span>
+    </div>
+    <div style="padding:6px 18px 16px">
+    ${rows.length ? `<div class="timeline">${rows.map((e) => `
+      <div class="tl-row">
+        <div class="tl-time">${esc(String(e.at).slice(0, 16).replace('T', ' '))}</div>
+        <div class="tl-body"><strong>${esc(e.actor_name || 'System')}</strong> ${esc(e.detail || e.action)}
+          ${e.entity_id ? `<span class="mono" style="color:var(--text-3)"> · ${esc(e.entity_id)}</span>` : ''}</div>
       </div>`).join('')}</div>` : '<div class="empty">No activity yet.</div>'}
+    </div>
   </div>`;
 }
 
@@ -1069,7 +1172,13 @@ function addUserModal() {
   const body = `<div class="form-grid">
     ${field('Full name', 'name', '')}
     ${field('Email *', 'email', '', 'email', 'required')}
-    ${selectField('Role', 'role', 'viewer', S.d.meta.roles.filter((r) => r !== 'owner').map((r) => [r, roleLabel(r)]))}
+    <label class="field"><span>Role</span>
+      <input name="role" list="roleIdeasAdd" value="Viewer" autocomplete="off" placeholder="Type or pick a role" />
+      <datalist id="roleIdeasAdd">
+        <option value="Admin"></option><option value="Editor"></option><option value="Viewer"></option>
+        ${[...new Set(S.d.users.map((u) => u.role))].filter((r) => r && !['owner', 'admin', 'editor', 'viewer'].includes(r)).map((r) => `<option value="${esc(r)}"></option>`).join('')}
+      </datalist>
+    </label>
     ${selectField('Department', 'dept', '', [['', '— none —'], ...depts.map((d) => [d, d])])}
     ${field('Temporary password *', 'password', '', 'password', 'required minlength="8"')}
   </div>
@@ -1088,6 +1197,41 @@ function addUserModal() {
       closeModal();
       render();
       toast('Account created', 'ok');
+    },
+  });
+}
+
+function customRoleModal(sub, name, current) {
+  const presetNames = ['admin', 'editor', 'viewer', 'owner'];
+  const seed = current && !presetNames.includes(current.toLowerCase()) ? current : '';
+  const body = `<div class="form-grid">
+    <label class="field wide"><span>Role name *</span>
+      <input name="role" value="${esc(seed)}" list="roleIdeas" autocomplete="off" placeholder="e.g. Store Keeper" required />
+      <datalist id="roleIdeas">
+        <option value="Store Keeper"></option>
+        <option value="Dispatch Lead"></option>
+        <option value="QC Engineer"></option>
+        <option value="Purchase Lead"></option>
+        <option value="Project Coordinator"></option>
+      </datalist>
+    </label>
+  </div>
+  <p class="sub-line" style="margin-top:10px">Type any job title — it is saved exactly as written and shown across the app. Access is Editor-level inside the person's department.</p>`;
+
+  modal({
+    title: `Custom role — ${name || 'user'}`,
+    sub: 'Free text. Admin and Viewer keep their own rules.',
+    body,
+    submit: 'Apply role',
+    async onSubmit(data) {
+      const role = String(data.role || '').trim();
+      if (!role) throw new Error('Type a role name');
+      if (role.toLowerCase() === 'owner') throw new Error('That name is reserved');
+      const res = await api('/api/users/' + encodeURIComponent(sub), 'PATCH', { role });
+      apply(res);
+      closeModal();
+      render();
+      toast(`Role set to ${role}`, 'ok');
     },
   });
 }
@@ -1400,6 +1544,13 @@ const ACTIONS = {
       apply(res); render(); toast('Holiday removed', 'ok');
     } catch (e) { toast(e.message, 'err'); }
   },
+  'open-stage': (el) => {
+    S.stage = el.dataset.stage;
+    S.status = 'open';
+    location.hash = '#/orders';
+    render();
+  },
+  'custom-role': (el) => customRoleModal(el.dataset.id, el.dataset.name || '', el.dataset.current || ''),
   notif: () => togglePanel('#notifPanel'),
   account: () => togglePanel('#accountMenu'),
   theme: () => toggleTheme(),
@@ -1436,6 +1587,13 @@ document.addEventListener('click', (ev) => {
 document.addEventListener('change', async (ev) => {
   const roleSel = ev.target.closest('[data-user-role]');
   if (roleSel) {
+    if (roleSel.value === '__custom__') {
+      const current = roleSel.dataset.current || 'viewer';
+      roleSel.value = current;
+      const u = (S.d.users || []).find((x) => x.sub === roleSel.dataset.userRole) || {};
+      customRoleModal(roleSel.dataset.userRole, u.name || u.email || '', current);
+      return;
+    }
     try {
       const res = await api('/api/users/' + encodeURIComponent(roleSel.dataset.userRole), 'PATCH', { role: roleSel.value });
       apply(res); render(); toast('Role updated', 'ok');

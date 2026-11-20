@@ -3,7 +3,8 @@ import {
   liveStatus, planOrder, capacityPlan, type PlanOrder, NUMBERED_STAGES,
 } from './plan';
 
-export type Role = 'owner' | 'admin' | 'editor' | 'viewer';
+/** Presets plus any custom job title an admin typed (e.g. "Store Keeper"). */
+export type Role = 'owner' | 'admin' | 'editor' | 'viewer' | (string & {});
 
 export type User = {
   sub: string;
@@ -35,6 +36,8 @@ export function can(u: User | null, action: Action): boolean {
   if (!u || !u.active) return false;
   if (u.role === 'owner' || u.role === 'admin') return true;
   if (u.role === 'viewer') return false;
+  // Any custom role falls through to the department rules below, i.e. it has
+  // Editor-level access scoped to its own department.
   if (action === 'users' || action === 'settings') return false;
   if (!u.dept) return false;
   return (DEPT_ACTIONS[u.dept] || []).includes(action);

@@ -80,6 +80,19 @@ type Ctx = { Bindings: Env; Variables: { user: User } };
 
 const ROLES: Role[] = ['owner', 'admin', 'editor', 'viewer'];
 
+/**
+ * Preset roles, or a custom job title an admin typed. "owner" is reserved for
+ * the first account, and names that match a preset collapse to it.
+ */
+function roleValue(v: unknown): Role | null {
+  const s = str(v, 40);
+  if (!s) return null;
+  const low = s.toLowerCase();
+  if (low === 'owner') return null;
+  if (low === 'admin' || low === 'editor' || low === 'viewer') return low;
+  return /^[A-Za-z][A-Za-z0-9 &/._-]{0,39}$/.test(s) ? s : null;
+}
+
 const app = new Hono<Ctx>();
 
 // APP_ORIGIN is set on managed hosting; a plain Cloudflare deploy derives it
@@ -275,7 +288,13 @@ async function snapshot(c: any) {
     activity: await listEvents(db, 120),
     dashboard: dash,
     today,
-    meta: { stages: STAGE_META, depts: DEPTS, roles: ROLES },
+    meta: {
+      stages: STAGE_META,
+      depts: DEPTS,
+      roles: ROLES,
+      customRoles: [...new Set(users.map((u) => u.role))]
+        .filter((r) => r && !ROLES.includes(r)),
+    },
   };
 }
 
@@ -473,7 +492,7 @@ app.post('/api/users', async (c) => {
   if (await findUserByEmail(c.env.DB, email)) {
     return c.json({ error: 'email_taken', message: `${email} already has an account` }, 409);
   }
-  const role: Role = ROLES.includes(body.role) ? body.role : 'viewer';
+  const role: Role = roleValue(body.role) || 'viewer';
   const dept = body.dept && DEPTS.includes(body.dept) ? body.dept : null;
   const name = str(body.name, 80) || email.split('@')[0];
   const me: User = c.get('user');
@@ -499,7 +518,7 @@ app.patch('/api/users/:sub', async (c) => {
   const body = await c.req.json().catch(() => ({}));
   const me: User = c.get('user');
 
-  const role = body.role === undefined ? undefined : (ROLES.includes(body.role) ? body.role : undefined);
+  const role = body.role === undefined ? undefined : (roleValue(body.role) ?? undefined);
   const dept = body.dept === undefined ? undefined : (body.dept && DEPTS.includes(body.dept) ? body.dept : null);
   const active = body.active === undefined ? undefined : body.active ? 1 : 0;
 
