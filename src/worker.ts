@@ -485,7 +485,7 @@ app.post('/api/orders/:id/stages/:stage/assign', async (c) => {
 app.post('/api/orders/:id/approval', async (c) => {
   const me: User = c.get('user');
   if (!['owner', 'admin', 'manager'].includes(me.role)) {
-    return c.json({ error: 'forbidden', message: 'Only Admin or Manager gives the final approval' }, 403);
+    return c.json({ error: 'forbidden', message: 'Only Owner, Admin or Manager gives the final approval' }, 403);
   }
   const id = c.req.param('id');
   const order = await c.env.DB.prepare('SELECT id FROM orders WHERE id = ?').bind(id).first();

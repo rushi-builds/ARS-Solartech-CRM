@@ -726,7 +726,7 @@ function openDrawer(id, silent) {
            </div>`
         : `<div class="card tight" style="margin-bottom:14px;border-color:rgba(251,191,36,.4)">
              <b>Waiting for final approval</b>
-             <p class="sub-line" style="margin-top:4px">Every department has finished. Admin / Manager signs off to close the order.</p>
+             <p class="sub-line" style="margin-top:4px">Every department has finished. Owner / Admin / Manager signs off to close the order.</p>
              <div class="inline" style="margin-top:10px">
                ${FULL_ROLES.includes(S.d.me.role)
                  ? `<button class="btn primary small" data-act="approve-order" data-id="${esc(o.id)}">Give final approval</button>`
