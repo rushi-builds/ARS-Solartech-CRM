@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "ars-solartech-srm",
+  "name": "ars-solartech-crm",
   "main": "dist/worker.js",
   "compatibility_date": "2026-11-19",
   "assets": {
@@ -11,8 +11,8 @@
   "d1_databases": [
     {
       "binding": "DB",
-      "database_name": "ars-solartech-srm",
-      "database_id": "e7026a69-5d5c-4f77-bd54-669bad3a17e5"
+      "database_name": "ars-solartech-crm",
+      "database_id": "c456aba5-1466-48a8-9554-303c600f41c8"
     }
   ],
   "observability": { "enabled": true }

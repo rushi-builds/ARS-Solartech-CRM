@@ -8,3 +8,4 @@ dev.log
 deploy.log
 .wrangler/test2
 .tmp-test
+.backup/

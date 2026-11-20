@@ -19,9 +19,9 @@ build.mjs          esbuild bundle + Sites deploy manifest
 
 | What | Value |
 | --- | --- |
-| Worker | `ars-solartech-srm` (Cloudflare account `Ktmenergyexperts`) |
-| URL | https://ars-solartech-srm.ktmenergyexperts.workers.dev |
-| Database | D1 `ars-solartech-srm` (`DB` binding) |
+| Worker | `ars-solartech-crm` (Cloudflare account `Ktmenergyexperts`) |
+| URL | https://ars-solartech-crm.ktmenergyexperts.workers.dev |
+| Database | D1 `ars-solartech-crm` (`DB` binding, id `c456aba5-1466-48a8-9554-303c600f41c8`) |
 
 Both this and any other environment keep their own D1 database. Tables are
 created by the Worker on its first request (`src/schema.ts`), so a fresh
@@ -80,7 +80,7 @@ visit on `http://localhost:8787` asks you to create the owner account.
 
 ```bash
 npx wrangler login                      # once per machine
-npx wrangler d1 create ars-solartech-srm   # prints database_id
+npx wrangler d1 create ars-solartech-crm   # prints database_id
 # put that id in wrangler.jsonc under d1_databases[0].database_id
 npm run deploy                          # build + wrangler deploy
 ```
@@ -90,7 +90,7 @@ The D1 tables are created on the first request — nothing to run by hand.
 `APP_ORIGIN` is optional: when it is not set, the Worker derives the origin from
 the request (set it only if you serve the app from several hostnames).
 
-Custom domain: Workers & Pages → `ars-solartech-srm` → Settings → Domains &
+Custom domain: Workers & Pages → `ars-solartech-crm` → Settings → Domains &
 Routes → Add custom domain.
 
 ## Importing orders
