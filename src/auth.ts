@@ -5,7 +5,10 @@
 
 export const SESSION_COOKIE = 'ars_session';
 const SESSION_DAYS = 30;
-const ITERATIONS = 150_000;
+// Cloudflare Workers' WebCrypto rejects PBKDF2 iteration counts above 100,000
+// ("Pbkdf2 failed: iteration counts above 100000 are not supported").
+const ITERATIONS = 100_000;
+const MAX_ITERATIONS = 100_000;
 
 const enc = new TextEncoder();
 const b64 = (buf: ArrayBuffer | Uint8Array): string => {
@@ -47,6 +50,8 @@ export async function verifyPassword(password: string, stored: string | null): P
   const parts = stored.split('$');
   if (parts.length !== 4 || parts[0] !== 'pbkdf2') return false;
   const iterations = Number(parts[1]) || ITERATIONS;
+  // Older hashes were stored with 150k iterations, which Workers cannot derive.
+  if (iterations > MAX_ITERATIONS) return false;
   const salt = fromB64(parts[2]);
   const expected = fromB64(parts[3]);
   const actual = await pbkdf2(password, salt, iterations);

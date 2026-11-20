@@ -6,7 +6,7 @@ CREATE TABLE IF NOT EXISTS users (
   email       TEXT,
   name        TEXT,
   dept        TEXT,
-  role        TEXT NOT NULL DEFAULT 'viewer',   -- owner | admin | editor | viewer
+  role        TEXT NOT NULL DEFAULT 'viewer',   -- admin | editor | viewer
   active      INTEGER NOT NULL DEFAULT 1,
   pass_hash   TEXT,                             -- pbkdf2$iterations$salt$hash
   created_at  TEXT NOT NULL,

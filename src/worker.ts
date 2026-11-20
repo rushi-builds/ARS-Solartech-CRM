@@ -3,6 +3,15 @@
 import { Hono } from 'hono';
 
 import { ensureSchema } from './schema';
+
+// Schema setup is idempotent but still costs D1 queries, so it runs once per
+// isolate instead of on every single API request.
+let schemaReady = false;
+async function ensureSchemaOnce(db: D1Database): Promise<void> {
+  if (schemaReady) return;
+  await ensureSchema(db);
+  schemaReady = true;
+}
 import {
   clearSessionCookie,
   hashPassword,
@@ -81,7 +90,7 @@ const siteOrigin = (c: any): string => c.env.APP_ORIGIN || new URL(c.req.url).or
 // Also runs the idempotent schema bootstrap so a fresh deployment is usable.
 app.get('/healthz', async (c) => {
   try {
-    await ensureSchema(c.env.DB);
+    await ensureSchemaOnce(c.env.DB);
     return c.json({ ok: true, db: 'ready', at: new Date().toISOString() });
   } catch (err) {
     return c.json({ ok: false, db: 'error', error: String((err as Error)?.message || err) }, 500);
@@ -95,18 +104,18 @@ async function startSession(c: any, user: User) {
   c.header('Set-Cookie', sessionCookie(token, siteOrigin(c)));
 }
 
-// Tells the login page whether it should show "create the owner account".
+// Tells the login page whether it should show "create the admin account".
 app.get('/api/auth/state', async (c) => {
-  await ensureSchema(c.env.DB);
+  await ensureSchemaOnce(c.env.DB);
   return c.json({ needsSetup: await noUsersYet(c.env.DB) });
 });
 
-// First run: the very first account becomes the owner.
+// First run: the very first account becomes the owner (shown as "Admin").
 app.post('/api/auth/setup', async (c) => {
-  await ensureSchema(c.env.DB);
+  await ensureSchemaOnce(c.env.DB);
   if (!sameOrigin(c.req.raw, siteOrigin(c))) return c.json({ error: 'bad_origin' }, 403);
   if (!(await noUsersYet(c.env.DB))) {
-    return c.json({ error: 'setup_closed', message: 'An owner account already exists. Ask them for an account.' }, 403);
+    return c.json({ error: 'setup_closed', message: 'An admin account already exists. Ask them for an account.' }, 403);
   }
   const body = await c.req.json().catch(() => ({}));
   const email = validEmail(body.email);
@@ -123,13 +132,14 @@ app.post('/api/auth/setup', async (c) => {
     passHash: await hashPassword(String(body.password)),
   });
   await logEvent(c.env.DB, { sub: user.sub, name: user.name }, 'user', user.sub, 'create',
-    `Owner account ${email} created`);
+    `Admin account ${email} created`);
   await startSession(c, user);
-  return c.json({ ok: true, me: user });
+  c.set('user', user);
+  return c.json({ ok: true, me: user, snapshot: await snapshot(c) });
 });
 
 app.post('/api/auth/login', async (c) => {
-  await ensureSchema(c.env.DB);
+  await ensureSchemaOnce(c.env.DB);
   if (!sameOrigin(c.req.raw, siteOrigin(c))) return c.json({ error: 'bad_origin' }, 403);
   const body = await c.req.json().catch(() => ({}));
   const email = validEmail(body.email);
@@ -146,7 +156,8 @@ app.post('/api/auth/login', async (c) => {
   await startSession(c, user);
   await logEvent(c.env.DB, { sub: user.sub, name: user.name }, 'user', user.sub, 'signin',
     `${user.name || email} signed in`);
-  return c.json({ ok: true, me: user });
+  c.set('user', user);
+  return c.json({ ok: true, me: user, snapshot: await snapshot(c) });
 });
 
 app.post('/api/auth/logout', async (c) => {
@@ -159,11 +170,15 @@ app.post('/api/auth/logout', async (c) => {
 // ---------------------------------------------------------------- auth guard
 app.use('/api/*', async (c, next) => {
   c.header('Cache-Control', 'private, no-store');
-  await ensureSchema(c.env.DB);
+  await ensureSchemaOnce(c.env.DB);
 
   const token = readSessionToken(c.req.raw);
   const user = token ? await sessionUser(c.env.DB, await sha256(token)) : null;
-  if (!user) return c.json({ error: 'signin_required', message: 'Sign in required' }, 401);
+  if (!user) {
+    // Save the client a second round trip: the 401 itself says whether the
+    // very first admin account still has to be created.
+    return c.json({ error: 'signin_required', message: 'Sign in required', needsSetup: await noUsersYet(c.env.DB) }, 401);
+  }
   c.set('user', user);
   await next();
 });
@@ -490,7 +505,7 @@ app.patch('/api/users/:sub', async (c) => {
 
   if (target.role === 'owner' && (role && role !== 'owner')) {
     const owners = await c.env.DB.prepare("SELECT COUNT(*) AS n FROM users WHERE role = 'owner' AND active = 1").first<{ n: number }>();
-    if ((owners?.n || 0) <= 1) return c.json({ error: 'last_owner', message: 'There must always be one active owner' }, 400);
+    if ((owners?.n || 0) <= 1) return c.json({ error: 'last_owner', message: 'There must always be one active Admin account' }, 400);
   }
   if (target.sub === me.sub && active === 0) {
     return c.json({ error: 'self_disable', message: 'You cannot disable your own account' }, 400);

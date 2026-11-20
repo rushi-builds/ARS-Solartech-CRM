@@ -36,6 +36,39 @@ function initials(name, email) {
 }
 function clampPct(n) { return Math.max(0, Math.min(100, Math.round(n))); }
 
+/* ── theme ─────────────────────────────────────────────────── */
+const SUN = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>';
+const MOON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A8.5 8.5 0 1 1 11.2 3a6.6 6.6 0 0 0 9.8 9.8z"/></svg>';
+
+function currentTheme() {
+  return document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
+}
+function paintTheme() {
+  const btn = $('#themeBtn');
+  if (!btn) return;
+  const light = currentTheme() === 'light';
+  btn.innerHTML = light ? SUN : MOON;
+  btn.title = light ? 'Switch to dark theme' : 'Switch to light theme';
+}
+function toggleTheme() {
+  const next = currentTheme() === 'light' ? 'dark' : 'light';
+  document.documentElement.dataset.theme = next;
+  try { localStorage.setItem('ars-theme', next); } catch { /* private mode */ }
+  paintTheme();
+}
+
+/* ── top bar popovers ──────────────────────────────────────── */
+function closePanels() {
+  ['#notifPanel', '#accountMenu'].forEach((sel) => { const el = $(sel); if (el) el.hidden = true; });
+}
+function togglePanel(sel) {
+  const el = $(sel);
+  if (!el) return;
+  const open = el.hidden;
+  closePanels();
+  el.hidden = !open;
+}
+
 /* ── icons ─────────────────────────────────────────────────── */
 const ICONS = {
   grid: '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
@@ -75,6 +108,7 @@ async function api(path, method = 'GET', body) {
     const err = new Error(data.message || data.error || `Request failed (${res.status})`);
     err.status = res.status;
     err.code = data.error;
+    err.data = data;
     throw err;
   }
   return data;
@@ -96,7 +130,34 @@ function cap(action) {
 
 function apply(payload) {
   const snap = payload && payload.snapshot ? payload.snapshot : payload;
-  if (snap && snap.me) S.d = snap;
+  if (snap && snap.me) { S.d = snap; saveCache(); }
+}
+
+/* ── cached snapshot ───────────────────────────────────────────
+   Keeps Worker request usage low: a reload within CACHE_TTL renders
+   the last snapshot from sessionStorage without touching the API.
+   The refresh button and every mutation always hit the server. */
+const CACHE_KEY = 'ars-snapshot-v1';
+const CACHE_TTL = 5 * 60_000;
+
+function saveCache() {
+  try {
+    if (S.d) sessionStorage.setItem(CACHE_KEY, JSON.stringify({ at: Date.now(), snap: S.d }));
+  } catch { /* storage full or blocked - not fatal */ }
+}
+
+function readCache() {
+  try {
+    const raw = sessionStorage.getItem(CACHE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || !parsed.snap || !parsed.snap.me) return null;
+    return { at: Number(parsed.at) || 0, snap: parsed.snap };
+  } catch { return null; }
+}
+
+function clearCache() {
+  try { sessionStorage.removeItem(CACHE_KEY); } catch { /* ignore */ }
 }
 
 function showGate(mode = 'login') {
@@ -114,9 +175,10 @@ function showGate(mode = 'login') {
 async function loadApp() {
   try {
     S.d = await api('/api/bootstrap');
+    saveCache();
     render();
   } catch (e) {
-    if (e.status === 401) showGate('login');
+    if (e.status === 401) { clearCache(); showGate(e.data && e.data.needsSetup ? 'setup' : 'login'); }
     else toast(e.message || 'Could not load data', 'err');
   }
 }
@@ -130,9 +192,10 @@ function wireAuthForms() {
       const data = Object.fromEntries(new FormData(loginForm).entries());
       btn.disabled = true;
       try {
-        await api('/api/auth/login', 'POST', { email: data.email, password: data.password });
+        const res = await api('/api/auth/login', 'POST', { email: data.email, password: data.password });
         loginForm.reset();
-        await loadApp();
+        apply(res);
+        if (S.d && S.d.me) render(); else await loadApp();
         toast('Signed in', 'ok');
       } catch (e) {
         toast(e.message || 'Sign in failed', 'err');
@@ -151,10 +214,11 @@ function wireAuthForms() {
       if (data.password !== data.password2) return toast('Passwords do not match', 'err');
       btn.disabled = true;
       try {
-        await api('/api/auth/setup', 'POST', { name: data.name, email: data.email, password: data.password });
+        const res = await api('/api/auth/setup', 'POST', { name: data.name, email: data.email, password: data.password });
         setupForm.reset();
-        await loadApp();
-        toast('Owner account created', 'ok');
+        apply(res);
+        render();
+        toast('Admin account created', 'ok');
       } catch (e) {
         toast(e.message || 'Could not create the account', 'err');
       } finally {
@@ -170,12 +234,25 @@ function wireAuthForms() {
 function render() {
   if (!S.d) return;
   const me = S.d.me;
+  const who = me.name || me.email || 'Signed in';
+  const role = `${roleLabel(me.role)}${me.dept ? ' · ' + me.dept : ''}`;
+  const abbr = initials(me.name, me.email);
+
   $('#gate').hidden = true;
   $('#shell').hidden = false;
-  $('#whoName').textContent = me.name || me.email || 'Signed in';
-  $('#whoRole').textContent = `${roleLabel(me.role)}${me.dept ? ' · ' + me.dept : ''}`;
-  $('#avatar').textContent = initials(me.name, me.email);
-  $('#todayPill').textContent = 'As of ' + fmt(S.d.today);
+  $('#whoName').textContent = who;
+  $('#whoRole').textContent = role;
+  $('#acctName').textContent = who;
+  $('#acctRole').textContent = role;
+  $('#acctEmail').textContent = me.email || '';
+  $('#avatar').textContent = abbr;
+  $('#acctAvatar').textContent = abbr;
+  $('#todayPill').textContent = fmt(S.d.today);
+  $('#todayPill').title = 'Data as of ' + fmt(S.d.today);
+  const canUsers = cap('users') || cap('settings');
+  $('#menuUsers').hidden = !canUsers;
+  $('#menuSettings').hidden = !cap('settings') && !cap('users');
+  renderNotifs();
 
   renderNav();
 
@@ -197,6 +274,29 @@ function render() {
   if (S.open) openDrawer(S.open, true);
 }
 
+function renderNotifs() {
+  const list = $('#notifList');
+  if (!list) return;
+  const k = S.d.dashboard.kpis;
+  const attention = (S.d.dashboard.attention || []).slice(0, 8);
+  list.innerHTML = attention.length
+    ? attention.map((a) => {
+      const tone = a.daysOverdue > 0 || a.rag === 'RED' ? 'red' : 'amber';
+      const sub = a.daysOverdue > 0
+        ? `${a.daysOverdue} day${a.daysOverdue === 1 ? '' : 's'} overdue · ${a.stage}`
+        : `Waiting on ${a.withWhom || a.stage}`;
+      return `<button class="notif-item ${tone}" data-act="open-order" data-id="${esc(a.id)}">
+        <span class="n-dot"></span>
+        <span><span class="n-title">${esc(a.customer || a.id)}</span><span class="n-sub">${esc(sub)}</span></span>
+      </button>`;
+    }).join('')
+    : '<div class="pop-empty">You are all caught up. No stage is past its planned date.</div>';
+  const badge = $('#notifCount');
+  if (badge) { badge.textContent = attention.length; badge.hidden = !attention.length; }
+  const sub = $('#notifSub');
+  if (sub) sub.textContent = attention.length ? `${attention.length} open` : `${k.red} red · ${k.overdue} late`;
+}
+
 function renderNav() {
   const items = [
     { id: 'dashboard' }, { id: 'orders' }, { id: 'dispatch' }, { id: 'capacity' },
@@ -214,7 +314,7 @@ function renderNav() {
 }
 
 function roleLabel(role) {
-  return ({ owner: 'Owner', admin: 'Admin', editor: 'Editor', viewer: 'Viewer' })[role] || role || 'Viewer';
+  return ({ owner: 'Admin', admin: 'Admin', editor: 'Editor', viewer: 'Viewer' })[role] || role || 'Viewer';
 }
 
 function ragBadge(rag) {
@@ -647,7 +747,7 @@ function viewUsers() {
   const users = S.d.users;
   const canManage = cap('users');
   const depts = S.d.meta.depts;
-  const owner = users.find((u) => u.role === 'owner');
+  const admin = users.find((u) => u.role === 'owner' || u.role === 'admin');
 
   return `
   <div class="card" style="margin-bottom:14px">
@@ -656,7 +756,7 @@ function viewUsers() {
       <span class="hint">${users.length} account${users.length === 1 ? '' : 's'}</span>
     </div>
     <div class="grid cols-4">
-      <div><div class="k" style="font-size:11px;color:var(--dim);font-weight:700">1 · Owner/admin adds them</div><p class="sub-line" style="margin-top:5px">Click <strong>Add user</strong> and set an email + temporary password.</p></div>
+      <div><div class="k" style="font-size:11px;color:var(--dim);font-weight:700">1 · Admin adds them</div><p class="sub-line" style="margin-top:5px">Click <strong>Add user</strong> and set an email + temporary password.</p></div>
       <div><div class="k" style="font-size:11px;color:var(--dim);font-weight:700">2 · They sign in</div><p class="sub-line" style="margin-top:5px">They open the site with that email and password.</p></div>
       <div><div class="k" style="font-size:11px;color:var(--dim);font-weight:700">3 · Department + role</div><p class="sub-line" style="margin-top:5px">Set below — changes apply on their next click.</p></div>
       <div><div class="k" style="font-size:11px;color:var(--dim);font-weight:700">4 · Enforced</div><p class="sub-line" style="margin-top:5px">Server checks every action against the department.</p></div>
@@ -667,7 +767,7 @@ function viewUsers() {
     <div class="card-head">
       <h3>Accounts</h3>
       <div class="inline">
-        <span class="hint">${owner ? 'Owner: ' + esc(owner.name || owner.email || owner.sub) : 'No owner yet'}</span>
+        <span class="hint">${admin ? 'Admin: ' + esc(admin.name || admin.email || admin.sub) : 'No admin yet'}</span>
         ${canManage ? '<button class="btn primary small" data-act="add-user">+ Add user</button>' : ''}
       </div>
     </div>
@@ -689,7 +789,7 @@ function viewUsers() {
               </td>
               <td>
                 <select data-user-role="${esc(u.sub)}" ${canManage ? '' : 'disabled'}>
-                  ${S.d.meta.roles.map((r) => opt(r, roleLabel(r), u.role)).join('')}
+                  ${S.d.meta.roles.filter((r) => r !== 'owner').map((r) => opt(r, 'Admin', u.role === 'owner' ? 'admin' : u.role)).join('')}
                 </select>
               </td>
               <td class="num">
@@ -705,7 +805,7 @@ function viewUsers() {
       </table>
     </div>
     <p class="sub-line" style="margin-top:12px">
-      Roles: <strong>Owner/Admin</strong> everything · <strong>Editor</strong> only their department's stages ·
+      Roles: <strong>Admin</strong> everything · <strong>Editor</strong> only their department's stages ·
       <strong>Viewer</strong> read only. Department mapping:
       ${S.d.meta.depts.map((d) => `${esc(d)}`).join(' · ')}.
     </p>
@@ -780,7 +880,7 @@ function viewSettings() {
       ${canEdit ? `<div class="form-actions" style="justify-content:flex-start">
         <button class="btn primary" data-act="save-settings">Save planning settings</button>
         <button class="btn" data-act="save-stakeholders">Save department heads</button>
-      </div>` : `<p class="sub-line">Only an owner or admin can change settings.</p>`}
+      </div>` : `<p class="sub-line">Only an admin can change settings.</p>`}
     </div>
 
     <div class="card">
@@ -941,7 +1041,7 @@ function addUserModal() {
   const body = `<div class="form-grid">
     ${field('Full name', 'name', '')}
     ${field('Email *', 'email', '', 'email', 'required')}
-    ${selectField('Role', 'role', 'viewer', S.d.meta.roles.map((r) => [r, roleLabel(r)]))}
+    ${selectField('Role', 'role', 'viewer', S.d.meta.roles.filter((r) => r !== 'owner').map((r) => [r, roleLabel(r)]))}
     ${selectField('Department', 'dept', '', [['', '— none —'], ...depts.map((d) => [d, d])])}
     ${field('Temporary password *', 'password', '', 'password', 'required minlength="8"')}
   </div>
@@ -949,7 +1049,7 @@ function addUserModal() {
 
   modal({
     title: 'Add user',
-    sub: 'Only an owner or admin can create accounts.',
+    sub: 'Only an admin can create accounts.',
     body,
     submit: 'Create account',
     wide: true,
@@ -1031,7 +1131,7 @@ function importModal() {
       e.preventDefault();
       downloadCsv('ars-order-import-template.csv',
         'Customer,Project,Structure Type,kWp,MT,PO Date,Confirmation Date,Due Date,Priority,Sales Owner,Design days,Procurement days,Production days,Remarks\n' +
-        'Example Solar Pvt Ltd,Rooftop 500kWp,MMS,500,12.5,2026-11-01,2026-11-05,2026-12-10,High,Rushikesh,,,,\n');
+        'Example Solar Pvt Ltd,Rooftop 500kWp,MMS,500,12.5,2026-11-01,2026-11-05,2026-12-10,High,A. Sharma,,,,\n');
     });
   }
 }
@@ -1272,10 +1372,15 @@ const ACTIONS = {
       apply(res); render(); toast('Holiday removed', 'ok');
     } catch (e) { toast(e.message, 'err'); }
   },
+  notif: () => togglePanel('#notifPanel'),
+  account: () => togglePanel('#accountMenu'),
+  theme: () => toggleTheme(),
+  'close-panels': () => closePanels(),
   'add-user': () => addUserModal(),
   'reset-password': (el) => resetPasswordModal(el.dataset.id, el.dataset.name || 'user'),
   signout: async () => {
     try { await api('/api/auth/logout', 'POST'); } catch { /* ignore */ }
+    clearCache();
     S.d = null;
     location.reload();
   },
@@ -1291,7 +1396,13 @@ document.addEventListener('click', async (ev) => {
   if (!fn) return;
   ev.preventDefault();
   ev.stopPropagation();
+  if (!['notif', 'account', 'theme'].includes(el.dataset.act)) closePanels();
   await fn(el);
+});
+
+document.addEventListener('click', (ev) => {
+  if (ev.target.closest('.popover') || ev.target.closest('[data-act="notif"]') || ev.target.closest('[data-act="account"]')) return;
+  closePanels();
 });
 
 document.addEventListener('change', async (ev) => {
@@ -1337,6 +1448,7 @@ function routeFromHash() {
 }
 
 window.addEventListener('hashchange', () => {
+  closePanels();
   routeFromHash();
   if (S.view !== 'orders') { S.open = null; closeDrawer(); }
   render();
@@ -1348,15 +1460,16 @@ document.addEventListener('keydown', (ev) => {
 
 /* ── boot ──────────────────────────────────────────────────── */
 (async function boot() {
+  paintTheme();
   routeFromHash();
   wireAuthForms();
-  let needsSetup = false;
-  try {
-    needsSetup = !!(await api('/api/auth/state')).needsSetup;
-  } catch { /* fall through to the normal login flow */ }
-  if (needsSetup) {
-    showGate('setup');
-    return;
+  const cached = readCache();
+  if (cached) {
+    // Render the last snapshot instantly. Only ask the server when it is stale,
+    // so repeat opens/reloads cost zero Worker requests.
+    S.d = cached.snap;
+    render();
+    if (Date.now() - cached.at < CACHE_TTL) return;
   }
   await loadApp();
 })();
