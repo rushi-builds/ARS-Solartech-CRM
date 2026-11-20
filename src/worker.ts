@@ -54,6 +54,7 @@ import {
   deleteSession,
   findUserByEmail,
   getAccessRequest,
+  isDeptSuperAdmin,
   isRootAdmin,
   listAccessRequests,
   noUsersYet,
@@ -839,7 +840,10 @@ app.put('/api/settings', async (c) => {
   // Without the Users power (a department super admin on a lower role) the
   // access matrix cannot move Users/Settings/Delete/Approval or the top roles.
   const before = await getSettings(c.env.DB);
-  if (!can(u, 'users', before.access)) s.access = restrictAccess(before.access, s.access);
+  // Access control belongs to the Super Admin department. Everyone else keeps
+  // the rest of Settings but cannot change the matrix, even through the API.
+  if (!isDeptSuperAdmin(u)) s.access = before.access;
+  else if (!can(u, 'users', before.access)) s.access = restrictAccess(before.access, s.access);
   await saveSettings(c.env.DB, s, u.sub);
   await logEvent(c.env.DB, { sub: u.sub, name: u.name }, 'settings', '1', 'update',
     `Design ${s.dur.des}d, approval ${s.dur.apr}d, procurement ${s.dur.pro}d, capacity ${s.cap} MT/day`);
