@@ -1131,7 +1131,7 @@ function viewUsers() {
       <p class="sub-line" style="margin:0">
         Department mapping: ${S.d.meta.depts.map((d) => esc(d)).join(' · ')}.
         A custom role keeps Editor-level access inside that department.
-        A department super admin gets the advanced Settings page for their department.
+        A department super admin gets advanced Settings; Access control opens for the Super Admin department.
       </p>
     </div>
   </div>`;
@@ -1141,6 +1141,11 @@ function viewUsers() {
 function viewSettings() {
   const s = S.d.settings;
   const canEdit = cap('settings');
+  // Access control is the admin-only part of Settings: it needs the account's
+  // department to be Super Admin. Planning, calendar, teams and alerts stay.
+  const canAccess = isDeptSuper(S.d.me);
+  const canPower = cap('users');
+  const POWER_KEYS = ['users', 'settings', 'delete', 'approve'];
   const roster = S.d.deptPeople || [];
   const access = s.access || {};
   const accessCols = [
@@ -1236,7 +1241,7 @@ function viewSettings() {
     </div>
   </div>
 
-  <div class="card flush" style="margin-top:14px">
+  ${canAccess ? `<div class="card flush" style="margin-top:14px">
     <div class="card-head">
       <div class="lead">
         <span class="head-ico grey">${icon('gear')}</span>
@@ -1254,13 +1259,31 @@ function viewSettings() {
         <tbody>
           ${accessRoles.map(([role, label]) => `<tr>
             <td class="cust"><span>${esc(label)}</span>${customAccess.includes(role) ? ` <button class="btn ghost small" data-act="del-access-role" data-role="${esc(role)}" title="Remove this custom role">×</button>` : ''}</td>
-            ${accessCols.map(([key]) => `<td><input type="checkbox" data-access="${role}" data-act-key="${key}" ${role === 'owner' || (access[role] || []).includes(key) ? 'checked' : ''} ${role === 'owner' || !canEdit ? 'disabled' : ''} /></td>`).join('')}
+            ${accessCols.map(([key]) => `<td><input type="checkbox" data-access="${role}" data-act-key="${key}" ${role === 'owner' || (access[role] || []).includes(key) ? 'checked' : ''} ${role === 'owner' || !canEdit || (!canPower && (role === 'admin' || role === 'manager' || POWER_KEYS.includes(key))) ? 'disabled' : ''} /></td>`).join('')}
           </tr>`).join('')}
+          <tr class="access-add-row">
+            <td class="cust">
+              <div class="inline">
+                <input id="newAccessRole" class="role-input" maxlength="40" placeholder="New role name" autocomplete="off" ${canEdit ? '' : 'disabled'} />
+                <button class="btn ghost small" data-act="add-access-role-inline" ${canEdit ? '' : 'disabled'}>+ Add role</button>
+              </div>
+            </td>
+            <td colspan="${accessCols.length}"><span class="sub-line">Type any role (e.g. Store Keeper) and add — it gets its own row right here, below Viewer.</span></td>
+          </tr>
         </tbody>
       </table>
     </div>
-    <p class="sub-line" style="margin:6px 18px 16px">Ticks apply to every account with that role. Owner is locked at full control. Without the Users power a department super admin cannot hand out Users, Settings, Delete or final approval.</p>
-  </div>
+    <p class="sub-line" style="margin:6px 18px 16px">Access control belongs to the <strong>Super Admin</strong> department. Owner is locked at full control. Users, Settings, final approval and Delete ticks need the Users power, so only an Admin can hand those out.</p>
+  </div>` : `<div class="card" style="margin-top:14px">
+    <div class="card-head">
+      <div class="lead">
+        <span class="head-ico grey">${icon('gear')}</span>
+        <div><p class="h-eyebrow">Access control</p><h3>Who can do what</h3></div>
+      </div>
+      <span class="badge grey">Super Admin only</span>
+    </div>
+    <p class="sub-line" style="margin:0 18px 16px">Set this account's department to <strong>Super Admin</strong> in Directory to open it. The rest of Settings — planning, calendar, teams, alerts and backup — stays available.</p>
+  </div>`}
 
   <div class="card" style="margin-top:14px">
     <div class="card-head">
@@ -1488,7 +1511,7 @@ function addUserModal() {
     <label class="field" data-custom-for="dept" hidden><span>Custom department name</span>
       <input name="dept_custom" autocomplete="off" placeholder="e.g. Super Admin" />
     </label>
-    <p class="sub-line wide" style="margin:0">Department <strong>Super Admin</strong> (preset or custom) opens the advanced Settings page — Access control, planning, alerts and teams.</p>
+    <p class="sub-line wide" style="margin:0">Department <strong>Super Admin</strong> (preset or custom) opens advanced Settings, including <strong>Access control</strong>. Planning, alerts and teams stay available to other settings users.</p>
     <label class="check wide"><input type="checkbox" name="dept_admin" value="1" /> Also mark as department super admin (optional)</label>
     ${field('Temporary password *', 'password', '', 'password', 'required minlength="8"')}
   </div>
@@ -1574,6 +1597,19 @@ function customDeptModal(sub, name, current) {
   });
 }
 
+async function addAccessRole(name) {
+  const role = String(name || '').trim();
+  if (!role) throw new Error('Type a role name');
+  if (!/^[A-Za-z][A-Za-z0-9 &/._-]{0,39}$/.test(role)) throw new Error('Use letters, digits, spaces or & / . _ -');
+  if (role.toLowerCase() === 'owner') throw new Error('Owner is reserved');
+  const access = { ...(S.d.settings.access || {}) };
+  if (access[role]) throw new Error(`"${role}" is already in the matrix`);
+  access[role] = [];
+  const res = await api('/api/settings', 'PUT', { ...S.d.settings, access });
+  apply(res);
+  toast(`Custom role ${role} added — tick its access, then save`, 'ok');
+}
+
 function accessRoleModal() {
   const body = `<div class="form-grid">
     <label class="field wide"><span>Role name *</span>
@@ -1587,18 +1623,9 @@ function accessRoleModal() {
     body,
     submit: 'Add role',
     async onSubmit(data) {
-      const role = String(data.role || '').trim();
-      if (!role) throw new Error('Type a role name');
-      if (!/^[A-Za-z][A-Za-z0-9 &/._-]{0,39}$/.test(role)) throw new Error('Use letters, digits, spaces or & / . _ -');
-      if (role.toLowerCase() === 'owner') throw new Error('Owner is reserved');
-      const access = { ...(S.d.settings.access || {}) };
-      if (access[role]) throw new Error(`"${role}" is already in the matrix`);
-      access[role] = [];
-      const res = await api('/api/settings', 'PUT', { ...S.d.settings, access });
-      apply(res);
+      await addAccessRole(data.role);
       closeModal();
       render();
-      toast(`Custom role ${role} added — tick its access, then save`, 'ok');
     },
   });
 }
@@ -1975,6 +2002,11 @@ const ACTIONS = {
     } catch (e) { toast(e.message, 'err'); }
   },
   'add-access-role': () => accessRoleModal(),
+  'add-access-role-inline': async () => {
+    const input = $('#newAccessRole');
+    try { await addAccessRole(input ? input.value : ''); render(); }
+    catch (e) { toast(e.message, 'err'); }
+  },
   'del-access-role': async (el) => {
     const role = el.dataset.role;
     if (!confirm(`Remove the custom role "${role}" from the access matrix?`)) return;
