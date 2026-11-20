@@ -24,6 +24,8 @@ export type User = {
   phone?: string | null;
   role: Role;
   active: number;
+  /** Super admin of their own department: opens advanced Settings. */
+  dept_admin?: number;
 };
 
 // Department -> what they are allowed to touch.
@@ -47,6 +49,9 @@ export function can(u: User | null, action: Action, access?: AccessMap): boolean
   if (!u || !u.active) return false;
   // The owner is never limited, whatever the matrix says.
   if (u.role === 'owner') return true;
+  // A department super admin, appointed by an Admin, opens the advanced
+  // backend settings (planning, working days, alerts, access matrix).
+  if (u.dept_admin && action === 'settings') return true;
   const map = access || DEFAULT_ACCESS;
   const preset = map[u.role];
   if (preset) return preset.includes(action);
@@ -77,7 +82,13 @@ export async function getSettings(db: D1Database): Promise<Settings> {
   if (!row) return { ...DEFAULT_SETTINGS };
   try {
     const parsed = JSON.parse(row.json);
-    return { ...DEFAULT_SETTINGS, ...parsed, dur: { ...DEFAULT_SETTINGS.dur, ...(parsed.dur || {}) } };
+    return {
+      ...DEFAULT_SETTINGS,
+      ...parsed,
+      dur: { ...DEFAULT_SETTINGS.dur, ...(parsed.dur || {}) },
+      notify: { ...DEFAULT_SETTINGS.notify, ...(parsed.notify || {}) },
+      access: { ...DEFAULT_SETTINGS.access, ...(parsed.access || {}) },
+    };
   } catch {
     return { ...DEFAULT_SETTINGS };
   }
@@ -96,13 +107,22 @@ export async function saveSettings(db: D1Database, s: Settings, by: string): Pro
 // ---------------- users ----------------
 export async function listUsers(db: D1Database): Promise<User[]> {
   const { results } = await db
-    .prepare('SELECT sub, email, name, dept, phone, role, active FROM users ORDER BY (role = \'owner\') DESC, name')
+    .prepare('SELECT sub, email, name, dept, phone, role, active, dept_admin FROM users ORDER BY (role = \'owner\') DESC, name')
     .all<User>();
   return results || [];
 }
 
 export async function getUser(db: D1Database, sub: string): Promise<User | null> {
-  return await db.prepare('SELECT sub, email, name, dept, phone, role, active FROM users WHERE sub = ?').bind(sub).first<User>();
+  return await db.prepare('SELECT sub, email, name, dept, phone, role, active, dept_admin FROM users WHERE sub = ?').bind(sub).first<User>();
+}
+
+/** Every super admin of one department, used for escalation alerts. */
+export async function listDeptAdmins(db: D1Database, dept: string): Promise<User[]> {
+  const { results } = await db
+    .prepare('SELECT sub, email, name, dept, phone, role, active, dept_admin FROM users WHERE dept = ? AND dept_admin = 1 AND active = 1')
+    .bind(dept)
+    .all<User>();
+  return results || [];
 }
 
 export type AuthRow = User & { pass_hash: string | null };
@@ -110,7 +130,7 @@ export type AuthRow = User & { pass_hash: string | null };
 /** Looks up a login row by email (case-insensitive). */
 export async function findUserByEmail(db: D1Database, email: string): Promise<AuthRow | null> {
   return await db
-    .prepare('SELECT sub, email, name, dept, phone, role, active, pass_hash FROM users WHERE lower(email) = lower(?)')
+    .prepare('SELECT sub, email, name, dept, phone, role, active, dept_admin, pass_hash FROM users WHERE lower(email) = lower(?)')
     .bind(email)
     .first<AuthRow>();
 }
@@ -123,17 +143,18 @@ export async function noUsersYet(db: D1Database): Promise<boolean> {
 
 export async function createUser(
   db: D1Database,
-  u: { sub: string; email: string; name: string | null; dept: string | null; phone?: string | null; role: Role; passHash: string },
+  u: { sub: string; email: string; name: string | null; dept: string | null; phone?: string | null; role: Role; passHash: string; deptAdmin?: boolean },
 ): Promise<User> {
   const at = nowISO();
+  const deptAdmin = u.deptAdmin ? 1 : 0;
   await db
     .prepare(
-      `INSERT INTO users (sub, email, name, dept, phone, role, active, pass_hash, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`,
+      `INSERT INTO users (sub, email, name, dept, phone, role, active, dept_admin, pass_hash, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`,
     )
-    .bind(u.sub, u.email, u.name, u.dept, u.phone || null, u.role, u.passHash, at, at)
+    .bind(u.sub, u.email, u.name, u.dept, u.phone || null, u.role, deptAdmin, u.passHash, at, at)
     .run();
-  return { sub: u.sub, email: u.email, name: u.name, dept: u.dept, phone: u.phone || null, role: u.role, active: 1 };
+  return { sub: u.sub, email: u.email, name: u.name, dept: u.dept, phone: u.phone || null, role: u.role, active: 1, dept_admin: deptAdmin };
 }
 
 export async function setPassword(db: D1Database, sub: string, passHash: string): Promise<void> {
@@ -152,7 +173,7 @@ export async function createSession(db: D1Database, sub: string, tokenHash: stri
 export async function sessionUser(db: D1Database, tokenHash: string): Promise<User | null> {
   const row = await db
     .prepare(
-      `SELECT u.sub, u.email, u.name, u.dept, u.phone, u.role, u.active
+      `SELECT u.sub, u.email, u.name, u.dept, u.phone, u.role, u.active, u.dept_admin
          FROM sessions s JOIN users u ON u.sub = s.sub
         WHERE s.token_hash = ? AND s.expires_at > ?`,
     )
@@ -203,7 +224,7 @@ export async function ensureUser(
 export async function updateUser(
   db: D1Database,
   sub: string,
-  patch: { dept?: string | null; role?: Role; active?: number; phone?: string | null },
+  patch: { dept?: string | null; role?: Role; active?: number; phone?: string | null; deptAdmin?: number },
 ): Promise<void> {
   const u = await getUser(db, sub);
   if (!u) throw new Error('User not found');
@@ -211,8 +232,9 @@ export async function updateUser(
   const role = patch.role === undefined ? u.role : patch.role;
   const active = patch.active === undefined ? u.active : patch.active;
   const phone = patch.phone === undefined ? (u.phone ?? null) : patch.phone;
-  await db.prepare('UPDATE users SET dept = ?, phone = ?, role = ?, active = ?, updated_at = ? WHERE sub = ?')
-    .bind(dept, phone, role, active, nowISO(), sub).run();
+  const deptAdmin = patch.deptAdmin === undefined ? (u.dept_admin ? 1 : 0) : patch.deptAdmin;
+  await db.prepare('UPDATE users SET dept = ?, phone = ?, role = ?, active = ?, dept_admin = ?, updated_at = ? WHERE sub = ?')
+    .bind(dept, phone, role, active, deptAdmin, nowISO(), sub).run();
 }
 
 // ---------------- access requests ----------------
@@ -410,7 +432,7 @@ export async function listDispatchRows(db: D1Database): Promise<DispatchRow[]> {
 export type EnrichedOrder = OrderRow & {
   a: Actuals;
   asg: Record<string, { sub: string | null; name: string | null }>;
-  verif: Record<string, { name: string | null; at: string | null }>;
+  verif: Record<string, { name: string | null; at: string | null; sub?: string | null }>;
   live: ReturnType<typeof liveStatus>;
 };
 
@@ -424,7 +446,7 @@ export function enrich(
 ): EnrichedOrder[] {
   const actuals: Record<string, Actuals> = {};
   const asg: Record<string, Record<string, { sub: string | null; name: string | null }>> = {};
-  const verif: Record<string, Record<string, { name: string | null; at: string | null }>> = {};
+  const verif: Record<string, Record<string, { name: string | null; at: string | null; sub?: string | null }>> = {};
   for (const r of stageRows) {
     if (r.assigned_sub || r.assigned_name) {
       asg[r.order_id] = asg[r.order_id] || {};
@@ -435,7 +457,7 @@ export function enrich(
     if ((STAGES as readonly string[]).includes(r.stage)) actuals[r.order_id][r.stage as StageKey] = r.actual_date;
     if (r.done_name) {
       verif[r.order_id] = verif[r.order_id] || {};
-      verif[r.order_id][r.stage] = { name: r.done_name, at: r.actual_date };
+      verif[r.order_id][r.stage] = { name: r.done_name, at: r.actual_date, sub: r.done_sub || null };
     }
   }
   const dispatched: Record<string, number> = {};
@@ -611,6 +633,111 @@ export async function listEvents(db: D1Database, limit = 200) {
     .bind(limit)
     .all();
   return results || [];
+}
+
+// ---------------- notifications outbox ----------------
+export type NotificationRow = {
+  id: string;
+  at: string;
+  channel: string;
+  target: string | null;
+  title: string | null;
+  body: string | null;
+  status: string;
+  error: string | null;
+  sub: string | null;
+  order_id: string | null;
+};
+
+export async function queueNotification(
+  db: D1Database,
+  n: { id: string; channel: string; target: string | null; title: string; body: string; sub: string | null; orderId: string | null },
+): Promise<void> {
+  await db
+    .prepare(
+      `INSERT INTO notifications (id, at, channel, target, title, body, status, sub, order_id)
+       VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?)`,
+    )
+    .bind(n.id, nowISO(), n.channel, n.target, n.title, n.body, n.sub, n.orderId)
+    .run();
+}
+
+export async function finishNotification(
+  db: D1Database,
+  id: string,
+  status: 'sent' | 'failed',
+  error: string | null,
+): Promise<void> {
+  await db.prepare('UPDATE notifications SET status = ?, error = ? WHERE id = ?').bind(status, error, id).run();
+}
+
+export async function listNotifications(db: D1Database, limit = 40, sub?: string): Promise<NotificationRow[]> {
+  const cols = 'id, at, channel, target, title, body, status, error, sub, order_id';
+  const stmt = sub
+    ? db.prepare(`SELECT ${cols} FROM notifications WHERE sub = ? ORDER BY at DESC LIMIT ?`).bind(sub, limit)
+    : db.prepare(`SELECT ${cols} FROM notifications ORDER BY at DESC LIMIT ?`).bind(limit);
+  const { results } = await stmt.all<NotificationRow>();
+  return results || [];
+}
+
+// ---------------- workload ----------------
+// Per-person picture: what is open, what is late and what they finished.
+export type WorkloadRow = {
+  sub: string;
+  name: string;
+  email: string | null;
+  dept: string | null;
+  role: Role;
+  open: number;
+  late: number;
+  done: number;
+};
+
+export function workload(
+  orders: EnrichedOrder[],
+  users: User[],
+  today: string,
+  doneDays = 30,
+): { rows: WorkloadRow[]; unassigned: number } {
+  const cutoff = new Date(Date.parse(today + 'T00:00:00Z') - doneDays * 86400000).toISOString().slice(0, 10);
+  const acc: Record<string, { open: number; late: number; done: number }> = {};
+  const bump = (sub: string) => (acc[sub] = acc[sub] || { open: 0, late: 0, done: 0 });
+  let unassigned = 0;
+  for (const o of orders) {
+    const closed = o.live.rag === 'CLOSED' || o.status === 'closed';
+    for (const [stage, who] of Object.entries(o.asg || {})) {
+      if (!who || !who.sub) continue;
+      if ((o.a as any)[stage] || closed) continue;
+      const a = bump(who.sub);
+      a.open++;
+      const due = o.live.plan ? (o.live.plan as any)[stage] : null;
+      if (due && due < today) a.late++;
+    }
+    for (const [stage, v] of Object.entries(o.verif || {})) {
+      if (v.sub && v.at && String(v.at) >= cutoff) bump(v.sub).done++;
+    }
+    if (!closed) {
+      const current = ['des', 'apr', 'mat', 'pf', 'qc', 'dsp'].find((k) => !(o.a as any)[k]);
+      if (current && !o.asg?.[current]?.sub) unassigned++;
+    }
+  }
+  const rows: WorkloadRow[] = users
+    .filter((u) => u.active)
+    .map((u) => {
+      const a = acc[u.sub] || { open: 0, late: 0, done: 0 };
+      return {
+        sub: u.sub,
+        name: u.name || u.email || '—',
+        email: u.email,
+        dept: u.dept,
+        role: u.role,
+        open: a.open,
+        late: a.late,
+        done: a.done,
+      };
+    })
+    .sort((a, b) => b.late - a.late || b.open - a.open || a.name.localeCompare(b.name));
+  return { rows, unassigned };
 }
 
 // ---------------- dashboard + capacity payloads ----------------

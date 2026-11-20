@@ -27,10 +27,12 @@ import {
 } from './auth';
 import {
   ACCESS_ACTIONS,
+  DEFAULT_ACCESS,
   DEFAULT_SETTINGS,
   DEPTS,
   STAGE_META,
   STAGES,
+  dayDiff,
   todayISO,
   type Settings,
   type StageKey,
@@ -39,6 +41,8 @@ import {
   can,
   capabilities,
   createAccessRequest,
+  finishNotification,
+  listDeptAdmins,
   dashboard,
   decideAccessRequest,
   deleteDispatch,
@@ -63,6 +67,7 @@ import {
   deleteDeptPerson,
   listDeptPeople,
   listEvents,
+  listNotifications,
   listOrderRows,
   listStageRows,
   listStakeholders,
@@ -70,13 +75,16 @@ import {
   listUsers,
   getUser,
   logEvent,
+  queueNotification,
   saveDispatch,
   saveOrder,
   saveSettings,
   saveStakeholder,
   setStage,
   updateUser,
+  workload,
   type Action,
+  type EnrichedOrder,
   type Role,
   type User,
 } from './db';
@@ -85,6 +93,16 @@ export interface Env {
   ASSETS: { fetch(request: Request): Promise<Response> };
   DB: D1Database;
   APP_ORIGIN?: string;
+  // Optional delivery channels. Without these the outbox still records every
+  // alert and the in-app bell keeps working.
+  RESEND_API_KEY?: string;
+  NOTIFY_FROM?: string;
+  WHATSAPP_TOKEN?: string;
+  WHATSAPP_PHONE_ID?: string;
+  // Floating assistant (OpenAI-compatible endpoint).
+  OPENAI_API_KEY?: string;
+  AI_BASE_URL?: string;
+  AI_MODEL?: string;
 }
 
 type Ctx = { Bindings: Env; Variables: { user: User; caps: Record<string, boolean> } };
@@ -178,7 +196,16 @@ app.post('/api/auth/login', async (c) => {
   if (!row.active) return c.json({ error: 'account_disabled', message: 'This account is disabled' }, 403);
 
   await purgeSessions(c.env.DB);
-  const user: User = { sub: row.sub, email: row.email, name: row.name, dept: row.dept, role: row.role, active: row.active };
+  const user: User = {
+    sub: row.sub,
+    email: row.email,
+    name: row.name,
+    dept: row.dept,
+    phone: row.phone,
+    role: row.role,
+    active: row.active,
+    dept_admin: row.dept_admin,
+  };
   // The designated super admin always comes back as owner, even if a row in an
   // older database still points at another role.
   if (isRootAdmin(user) && user.role !== 'owner') {
@@ -324,6 +351,134 @@ function fyPrefix(): string {
   return `ARS-${String(fy).slice(2)}${String(fy + 1).slice(2)}-`;
 }
 
+// ---------------------------------------------------------------- alerts
+export type Escalation = {
+  id: string;
+  customer: string;
+  stage: string;
+  dept: string;
+  assignee: string;
+  days: number;
+  due: string | null;
+  level: 'Escalated' | 'Critical';
+};
+
+/** Stages that stayed overdue past the escalation window, worst first. */
+function escalations(orders: EnrichedOrder[], settings: Settings, today: string): Escalation[] {
+  const limit = Math.max(1, settings.notify?.escalate || 2);
+  const keys: StageKey[] = ['des', 'apr', 'mat', 'pf', 'qc', 'dsp'];
+  const out: Escalation[] = [];
+  for (const o of orders) {
+    if (o.status !== 'open' || o.live.rag === 'CLOSED') continue;
+    const key = keys.find((k) => !(o.a as any)[k]);
+    if (!key) continue;
+    const due = o.live.plan ? (o.live.plan as any)[key] : null;
+    const days = due ? Math.max(0, dayDiff(today, due)) : 0;
+    if (days < limit) continue;
+    const meta = STAGE_META.find((m) => m.key === key);
+    out.push({
+      id: o.id,
+      customer: o.customer || o.id,
+      stage: meta?.label || key,
+      dept: o.live.dept,
+      assignee: o.asg?.[key]?.name || '',
+      days,
+      due,
+      level: days >= limit * 2 ? 'Critical' : 'Escalated',
+    });
+  }
+  return out.sort((a, b) => b.days - a.days).slice(0, 60);
+}
+
+/**
+ * Delivers one alert through its channel. Missing secrets are recorded as a
+ * failed row, never thrown, so the in-app notification is never lost.
+ */
+async function deliverOne(
+  env: Env,
+  settings: Settings,
+  n: { id: string; channel: string; target: string | null; title: string; body: string },
+): Promise<void> {
+  let error: string | null = null;
+  try {
+    if (n.channel === 'email') {
+      if (!env.RESEND_API_KEY) throw new Error('RESEND_API_KEY is not set on the Worker');
+      const res = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: { authorization: `Bearer ${env.RESEND_API_KEY}`, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          from: env.NOTIFY_FROM || 'ARS Solartech <onboarding@resend.dev>',
+          to: [n.target],
+          subject: n.title,
+          text: n.body,
+        }),
+      });
+      if (!res.ok) throw new Error(`email provider returned ${res.status}`);
+    } else if (n.channel === 'whatsapp') {
+      if (!env.WHATSAPP_TOKEN || !env.WHATSAPP_PHONE_ID) {
+        throw new Error('WHATSAPP_TOKEN / WHATSAPP_PHONE_ID are not set on the Worker');
+      }
+      const to = String(n.target || '').replace(/[^0-9]/g, '');
+      const res = await fetch(`https://graph.facebook.com/v20.0/${env.WHATSAPP_PHONE_ID}/messages`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${env.WHATSAPP_TOKEN}`, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          messaging_product: 'whatsapp',
+          to,
+          type: 'text',
+          text: { body: `${n.title}\n${n.body}` },
+        }),
+      });
+      if (!res.ok) throw new Error(`WhatsApp returned ${res.status}`);
+    } else {
+      if (!settings.notify.webhook) throw new Error('Webhook URL is not set');
+      const res = await fetch(settings.notify.webhook, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          channel: n.channel,
+          to: n.target,
+          title: n.title,
+          text: n.body,
+          at: new Date().toISOString(),
+        }),
+      });
+      if (!res.ok) throw new Error(`Webhook returned ${res.status}`);
+    }
+  } catch (e) {
+    error = String((e as Error)?.message || e);
+  }
+  await finishNotification(env.DB, n.id, error ? 'failed' : 'sent', error);
+}
+
+/** Queues an alert for one person on every channel enabled in Settings. */
+async function notifyUser(c: any, target: User, title: string, body: string, orderId: string | null): Promise<number> {
+  const settings = await getSettings(c.env.DB);
+  const channels: { channel: string; target: string | null }[] = [];
+  if (settings.notify.email && target.email) channels.push({ channel: 'email', target: target.email });
+  if (settings.notify.whatsapp && target.phone) channels.push({ channel: 'whatsapp', target: target.phone });
+  if (settings.notify.webhook) channels.push({ channel: 'webhook', target: target.phone || target.email || null });
+  for (const ch of channels) {
+    const id = crypto.randomUUID();
+    await queueNotification(c.env.DB, {
+      id,
+      channel: ch.channel,
+      target: ch.target,
+      title,
+      body,
+      sub: target.sub,
+      orderId,
+    });
+    const row = { id, channel: ch.channel, target: ch.target, title, body };
+    try {
+      c.executionCtx.waitUntil(deliverOne(c.env, settings, row));
+    } catch {
+      await deliverOne(c.env, settings, row);
+    }
+  }
+  return channels.length;
+}
+
 async function snapshot(c: any) {
   const env = c.env as Env;
   const user: User = c.get('user');
@@ -344,6 +499,9 @@ async function snapshot(c: any) {
   const caps = capabilities(user, settings.access);
   // Admins see every request; everyone else only sees their own.
   const accessRequests = await listAccessRequests(db, 60, caps.users ? undefined : user.sub);
+  const loads = workload(enriched, users, today);
+  const escalationList = escalations(enriched, settings, today);
+  const outbox = await listNotifications(db, 40, caps.users ? undefined : user.sub);
   return {
     me: user,
     capabilities: caps,
@@ -356,14 +514,24 @@ async function snapshot(c: any) {
     activity: await listEvents(db, 120),
     dashboard: dash,
     accessRequests,
+    workload: loads,
+    escalations: escalationList,
+    notifications: outbox,
     today,
     meta: {
       stages: STAGE_META,
       depts: [...new Set([...DEPTS, ...users.map((u) => u.dept).filter((d): d is string => !!d)])],
       roles: ROLES,
+      accessRoles: Object.keys(settings.access),
       customRoles: [...new Set(users.map((u) => u.role))]
         .filter((r) => r && !ROLES.includes(r)),
       pendingRequests: accessRequests.filter((r) => r.status === 'pending').length,
+      aiConfigured: !!c.env.OPENAI_API_KEY,
+      channels: {
+        email: !!c.env.RESEND_API_KEY,
+        whatsapp: !!(c.env.WHATSAPP_TOKEN && c.env.WHATSAPP_PHONE_ID),
+        webhook: !!settings.notify.webhook,
+      },
     },
   };
 }
@@ -470,8 +638,9 @@ app.post('/api/orders/:id/stages/:stage/assign', async (c) => {
   const sub = str(body.sub, 60);
   const full = me.role === 'owner' || me.role === 'admin' || me.role === 'manager';
   let name: string | null = null;
+  let target: User | null = null;
   if (sub) {
-    const target = await getUser(c.env.DB, sub);
+    target = await getUser(c.env.DB, sub);
     if (!target || !target.active) return c.json({ error: 'bad_user', message: 'Pick an active account' }, 400);
     if (!full && target.dept !== me.dept) {
       return c.json({ error: 'wrong_dept', message: 'You can only assign people from your own department' }, 400);
@@ -483,6 +652,9 @@ app.post('/api/orders/:id/stages/:stage/assign', async (c) => {
   const label = STAGE_META.find((m) => m.key === stage)?.label || stage;
   await logEvent(c.env.DB, { sub: me.sub, name: me.name }, 'order', id, 'assign',
     `${label}: ${name || 'unassigned'}`);
+  if (target) {
+    await notifyUser(c, target, `Task assigned: ${label}`, `${id} · ${label} is now on you. Open the CRM for the planned date.`, id);
+  }
   return c.json({ ok: true, snapshot: await snapshot(c) });
 });
 
@@ -610,16 +782,49 @@ function sanitizeSettings(raw: any): Settings {
     off: [...new Set(off as number[])].sort(),
     holidays: [...new Set(holidays as string[])].sort(),
     access: sanitizeAccess(raw?.access),
+    notify: {
+      email: !!raw?.notify?.email,
+      whatsapp: !!raw?.notify?.whatsapp,
+      webhook: /^https?:\/\//i.test(String(raw?.notify?.webhook || ''))
+        ? String(raw.notify.webhook).trim().slice(0, 400)
+        : '',
+      escalate: Math.round(clamp(raw?.notify?.escalate, 1, 60, DEFAULT_SETTINGS.notify.escalate)),
+    },
   };
 }
 
-/** Who may do what. Owner stays full; a role missing from the payload keeps its default. */
+/**
+ * Who may do what. Owner stays full; a role missing from the payload keeps its
+ * default. Any extra key is a custom role added from the matrix.
+ */
 function sanitizeAccess(raw: any): Record<string, string[]> {
+  const roles = new Set(['owner', 'admin', 'manager', 'editor', 'viewer']);
+  if (raw && typeof raw === 'object') {
+    for (const key of Object.keys(raw)) {
+      if (/^[A-Za-z][A-Za-z0-9 &/._-]{0,39}$/.test(key)) roles.add(key);
+    }
+  }
   const out: Record<string, string[]> = {};
-  for (const role of ['owner', 'admin', 'manager', 'editor', 'viewer']) {
+  for (const role of roles) {
+    if (role.toLowerCase() === 'owner') continue;
     const given = raw && Array.isArray(raw[role]) ? raw[role].map(String) : null;
     const list = given || (DEFAULT_SETTINGS.access as any)[role] || [];
     out[role] = (ACCESS_ACTIONS as readonly string[]).filter((a) => list.includes(a));
+  }
+  out.owner = [...ACCESS_ACTIONS];
+  return out;
+}
+
+// Settings a department super admin may not hand out: only someone with the
+// Users power can change the powerful roles or these actions.
+const POWER_ACTIONS = ['users', 'settings', 'delete', 'approve'];
+
+function restrictAccess(before: Record<string, string[]>, next: Record<string, string[]>): Record<string, string[]> {
+  const out: Record<string, string[]> = { ...next };
+  for (const role of ['admin', 'manager']) out[role] = before[role] || DEFAULT_ACCESS[role] || [];
+  for (const [role, list] of Object.entries(out)) {
+    if (role === 'owner') continue;
+    out[role] = list.filter((a) => !POWER_ACTIONS.includes(a));
   }
   out.owner = [...ACCESS_ACTIONS];
   return out;
@@ -631,6 +836,10 @@ app.put('/api/settings', async (c) => {
   const body = await c.req.json().catch(() => ({}));
   const s = sanitizeSettings(body);
   const u: User = c.get('user');
+  // Without the Users power (a department super admin on a lower role) the
+  // access matrix cannot move Users/Settings/Delete/Approval or the top roles.
+  const before = await getSettings(c.env.DB);
+  if (!can(u, 'users', before.access)) s.access = restrictAccess(before.access, s.access);
   await saveSettings(c.env.DB, s, u.sub);
   await logEvent(c.env.DB, { sub: u.sub, name: u.name }, 'settings', '1', 'update',
     `Design ${s.dur.des}d, approval ${s.dur.apr}d, procurement ${s.dur.pro}d, capacity ${s.cap} MT/day`);
@@ -677,6 +886,10 @@ app.post('/api/users', async (c) => {
   const dept = deptName(body.dept);
   const phone = str(body.phone, 30);
   const name = str(body.name, 80) || email.split('@')[0];
+  const deptAdmin = !!body.dept_admin;
+  if (deptAdmin && !dept) {
+    return c.json({ error: 'dept_required', message: 'Pick a department before making someone its super admin' }, 400);
+  }
   const me: User = c.get('user');
   const user = await createUser(c.env.DB, {
     sub: crypto.randomUUID(),
@@ -685,10 +898,11 @@ app.post('/api/users', async (c) => {
     dept,
     phone,
     role,
+    deptAdmin,
     passHash: await hashPassword(String(body.password)),
   });
   await logEvent(c.env.DB, { sub: me.sub, name: me.name }, 'user', user.sub, 'create',
-    `${name} added as ${role}${dept ? ' · ' + dept : ''}`);
+    `${name} added as ${role}${dept ? ' · ' + dept : ''}${deptAdmin ? ' · department super admin' : ''}`);
   return c.json({ ok: true, user, snapshot: await snapshot(c) });
 });
 
@@ -705,6 +919,10 @@ app.patch('/api/users/:sub', async (c) => {
   const dept = body.dept === undefined ? undefined : deptName(body.dept);
   const active = body.active === undefined ? undefined : body.active ? 1 : 0;
   const phone = body.phone === undefined ? undefined : str(body.phone, 30);
+  const deptAdmin = body.dept_admin === undefined ? undefined : body.dept_admin ? 1 : 0;
+  if (deptAdmin === 1 && !(dept === undefined ? target.dept : dept)) {
+    return c.json({ error: 'dept_required', message: 'Pick a department before making someone its super admin' }, 400);
+  }
 
   // The designated super admin keeps full control of the workspace for good.
   if (isRootAdmin(target)) {
@@ -724,7 +942,7 @@ app.patch('/api/users/:sub', async (c) => {
     return c.json({ error: 'self_disable', message: 'You cannot disable your own account' }, 400);
   }
 
-  await updateUser(c.env.DB, sub, { role, dept, active, phone });
+  await updateUser(c.env.DB, sub, { role, dept, active, phone, deptAdmin });
   if (typeof body.password === 'string' && body.password) {
     const problem = passwordProblem(body.password);
     if (problem) return c.json({ error: 'weak_password', message: problem }, 400);
@@ -733,7 +951,7 @@ app.patch('/api/users/:sub', async (c) => {
       `Password reset for ${target.name || target.email || sub}`);
   }
   await logEvent(c.env.DB, { sub: me.sub, name: me.name }, 'user', sub, 'update',
-    `${target.name || target.email || sub}: role=${role ?? target.role}, dept=${dept ?? '-'}, active=${active ?? target.active}`);
+    `${target.name || target.email || sub}: role=${role ?? target.role}, dept=${dept ?? '-'}, active=${active ?? target.active}${deptAdmin !== undefined ? ', dept admin=' + (deptAdmin ? 'yes' : 'no') : ''}`);
   return c.json({ ok: true, snapshot: await snapshot(c) });
 });
 
@@ -863,6 +1081,130 @@ app.post('/api/import', async (c) => {
   }
   await logEvent(c.env.DB, { sub: u.sub, name: u.name }, 'order', null, 'import', `${created} orders imported`);
   return c.json({ ok: true, created, skipped, snapshot: await snapshot(c) });
+});
+
+// ---------------------------------------------------------------- escalations + alerts
+// Raises alerts to the department super admins (or the management team when a
+// department has none) for every stage that crossed the escalation window.
+app.post('/api/escalations/run', async (c) => {
+  const denied = guard(c, 'settings');
+  if (denied) return denied;
+  const me: User = c.get('user');
+  const snap = await snapshot(c);
+  const list = (snap.escalations || []) as Escalation[];
+  const users = (snap.users || []) as User[];
+  const seen = new Set<string>();
+  let alerts = 0;
+  for (const e of list) {
+    let people = await listDeptAdmins(c.env.DB, e.dept);
+    if (!people.length) {
+      people = users.filter((u) => u.active && ['owner', 'admin', 'manager'].includes(u.role));
+    }
+    for (const p of people) {
+      const key = p.sub + '|' + e.id;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      alerts += await notifyUser(
+        c,
+        p,
+        `${e.level}: ${e.customer}`,
+        `${e.stage} is ${e.days} day${e.days === 1 ? '' : 's'} overdue${e.assignee ? ' with ' + e.assignee : ''} on ${e.id}.`,
+        e.id,
+      );
+    }
+  }
+  await logEvent(c.env.DB, { sub: me.sub, name: me.name }, 'order', null, 'escalation',
+    `${list.length} overdue order(s) checked, ${alerts} alert(s) queued`);
+  return c.json({ ok: true, orders: list.length, alerts, snapshot: await snapshot(c) });
+});
+
+// Send one alert to yourself to prove the channels work.
+app.post('/api/notifications/test', async (c) => {
+  const denied = guard(c, 'settings');
+  if (denied) return denied;
+  const me: User = c.get('user');
+  const channels = await notifyUser(c, me, 'ARS CRM test alert', 'If you received this, your notification channel is wired correctly.', null);
+  return c.json({ ok: true, channels, snapshot: await snapshot(c) });
+});
+
+// ---------------------------------------------------------------- AI assistant
+// Floating assistant. Data goes to an OpenAI-compatible endpoint with the
+// owner's own key (server-side only); the browser never sees the key.
+app.post('/api/ai/chat', async (c) => {
+  const key = c.env.OPENAI_API_KEY;
+  if (!key) {
+    return c.json(
+      { error: 'ai_not_configured', message: 'The assistant is not switched on. Add OPENAI_API_KEY to the Worker secrets, then reload.' },
+      400,
+    );
+  }
+  const me: User = c.get('user');
+  const body = await c.req.json().catch(() => ({}));
+  const message = str(body.message, 4000);
+  if (!message) return c.json({ error: 'empty', message: 'Type a question first' }, 400);
+  const history = Array.isArray(body.history)
+    ? body.history.slice(-8).map((m: any) => ({
+      role: m && m.role === 'assistant' ? 'assistant' : 'user',
+      content: String((m && m.content) || '').slice(0, 2000),
+    }))
+    : [];
+
+  const snap = await snapshot(c);
+  const context = {
+    today: snap.today,
+    signedInAs: { name: me.name, role: me.role, dept: me.dept },
+    kpis: snap.dashboard.kpis,
+    orders: snap.orders.slice(0, 80).map((o) => ({
+      id: o.id,
+      customer: o.customer,
+      project: o.project,
+      stage: o.live.stage,
+      dept: o.live.dept,
+      due: o.due_date,
+      forecast: o.live.forecastDispatch,
+      daysLate: o.live.daysOverdue,
+      status: o.live.ragLabel,
+      approval: o.approval,
+      mt: o.mt,
+      assigned: o.asg,
+    })),
+    workload: snap.workload.rows,
+    escalations: snap.escalations,
+  };
+
+  const base = String(c.env.AI_BASE_URL || 'https://freebuff.com/api/v1/paid').replace(/\/$/, '');
+  const model = c.env.AI_MODEL || 'gpt-4o-mini';
+  try {
+    const res = await fetch(base + '/chat/completions', {
+      method: 'POST',
+      headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model,
+        temperature: 0.2,
+        messages: [
+          {
+            role: 'system',
+            content:
+              'You are the ARS Solartech CRM assistant. Answer only from the CRM data supplied. ' +
+              'Be short, factual and useful: name the order id, stage, department and dates. ' +
+              'If the data does not contain the answer, say so plainly. Never invent orders, people or dates. ' +
+              'You cannot change data; tell the user which screen to use for a change.',
+          },
+          { role: 'system', content: 'CRM snapshot JSON:\n' + JSON.stringify(context).slice(0, 60000) },
+          ...history,
+          { role: 'user', content: message },
+        ],
+      }),
+    });
+    if (!res.ok) {
+      return c.json({ error: 'ai_failed', message: `Assistant provider returned ${res.status}` }, 502);
+    }
+    const data: any = await res.json();
+    const reply = data?.choices?.[0]?.message?.content;
+    return c.json({ ok: true, reply: String(reply || '').slice(0, 8000), meta: { model } });
+  } catch (e) {
+    return c.json({ error: 'ai_failed', message: String((e as Error)?.message || e) }, 502);
+  }
 });
 
 // ---------------------------------------------------------------- activity

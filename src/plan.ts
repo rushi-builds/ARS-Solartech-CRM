@@ -19,6 +19,13 @@ export const DEFAULT_ACCESS: AccessMap = {
   viewer: [],
 };
 
+export type NotifySettings = {
+  email: boolean;       // send to the account email (needs RESEND_API_KEY)
+  whatsapp: boolean;    // send to the account mobile (needs WHATSAPP_TOKEN + WHATSAPP_PHONE_ID)
+  webhook: string;      // any gateway: WhatsApp/SMS/n8n/Zapier receives JSON
+  escalate: number;     // days overdue before a task is escalated
+};
+
 export type Settings = {
   dur: { des: number; apr: number; pro: number; qc: number; dsp: number };
   cap: number;          // MT per working day
@@ -26,6 +33,7 @@ export type Settings = {
   off: number[];        // 0=Sun .. 6=Sat
   holidays: string[];   // YYYY-MM-DD
   access: AccessMap;    // role -> allowed actions
+  notify: NotifySettings;
 };
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -35,6 +43,7 @@ export const DEFAULT_SETTINGS: Settings = {
   off: [0],
   holidays: [],
   access: { ...DEFAULT_ACCESS },
+  notify: { email: false, whatsapp: false, webhook: '', escalate: 2 },
 };
 
 export const STAGES = ['des', 'apr', 'mat', 'ps', 'pf', 'qc', 'dsp'] as const;

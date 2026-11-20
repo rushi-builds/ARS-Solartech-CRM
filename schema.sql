@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS users (
   phone       TEXT,
   role        TEXT NOT NULL DEFAULT 'viewer',   -- admin | editor | viewer
   active      INTEGER NOT NULL DEFAULT 1,
+  dept_admin  INTEGER NOT NULL DEFAULT 0,       -- super admin of this department
   pass_hash   TEXT,                             -- pbkdf2$iterations$salt$hash
   created_at  TEXT NOT NULL,
   updated_at  TEXT NOT NULL
@@ -134,6 +135,22 @@ CREATE TABLE IF NOT EXISTS access_requests (
   decided_by    TEXT,
   decision_note TEXT
 );
+
+CREATE TABLE IF NOT EXISTS notifications (
+  id          TEXT PRIMARY KEY,
+  at          TEXT NOT NULL,
+  channel     TEXT NOT NULL,                    -- email | whatsapp | webhook
+  target      TEXT,
+  title       TEXT,
+  body        TEXT,
+  status      TEXT NOT NULL DEFAULT 'queued',   -- queued | sent | failed
+  error       TEXT,
+  sub         TEXT,
+  order_id    TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_notifications_at  ON notifications(at DESC);
+CREATE INDEX IF NOT EXISTS idx_notifications_sub ON notifications(sub);
 
 CREATE TABLE IF NOT EXISTS events (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
