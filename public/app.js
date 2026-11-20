@@ -1602,10 +1602,10 @@ function renderAi() {
   if (!log) return;
   const me = (S.d && S.d.me) || {};
   if (!AI.log.length) {
-    const first = String(me.name || me.email || 'there').split(/[\s@.]/).filter(Boolean)[0] || 'there';
+    const person = String(me.name || me.email || 'there').trim();
     AI.log.push({
       role: 'assistant',
-      content: `Hi ${first} — ask me about any order, a delay, the approval queue or who is overloaded.`,
+      content: `Hi ${person} — welcome to ARS Solartech CRM. Ask me about any order, a delay, the approval queue or who is overloaded.`,
     });
   }
   const off = !(S.d && S.d.meta && S.d.meta.aiConfigured);
