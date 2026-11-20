@@ -2,12 +2,30 @@
 // Mirrors the Excel workbook: working days, parallel approval/procurement,
 // production days = ceil(MT / capacity), QC and dispatch prep at the end.
 
+// Every permission a role can hold. The matrix in Settings edits these.
+export const ACCESS_ACTIONS = [
+  'order', 'ovr', 'settings', 'users', 'delete', 'approve',
+  'des', 'apr', 'mat', 'ps', 'pf', 'qc', 'dsp', 'disp',
+] as const;
+export type AccessAction = (typeof ACCESS_ACTIONS)[number];
+export type AccessMap = Record<string, string[]>;
+
+// Presets. Owner is never limited; custom roles follow their department.
+export const DEFAULT_ACCESS: AccessMap = {
+  owner: [...ACCESS_ACTIONS],
+  admin: [...ACCESS_ACTIONS],
+  manager: [...ACCESS_ACTIONS],
+  editor: ['des', 'apr', 'mat', 'ps', 'pf', 'qc', 'dsp', 'disp'],
+  viewer: [],
+};
+
 export type Settings = {
   dur: { des: number; apr: number; pro: number; qc: number; dsp: number };
   cap: number;          // MT per working day
   tight: number;        // tight-buffer alert (days)
   off: number[];        // 0=Sun .. 6=Sat
   holidays: string[];   // YYYY-MM-DD
+  access: AccessMap;    // role -> allowed actions
 };
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -16,6 +34,7 @@ export const DEFAULT_SETTINGS: Settings = {
   tight: 3,
   off: [0],
   holidays: [],
+  access: { ...DEFAULT_ACCESS },
 };
 
 export const STAGES = ['des', 'apr', 'mat', 'ps', 'pf', 'qc', 'dsp'] as const;

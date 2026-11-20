@@ -1,6 +1,6 @@
 import {
-  DEFAULT_SETTINGS, STAGES, type Actuals, type Settings, type StageKey,
-  liveStatus, planOrder, capacityPlan, type PlanOrder, NUMBERED_STAGES,
+  DEFAULT_ACCESS, DEFAULT_SETTINGS, STAGES, type AccessMap, type Actuals, type Settings,
+  type StageKey, liveStatus, planOrder, capacityPlan, type PlanOrder, NUMBERED_STAGES,
 } from './plan';
 
 /** Presets plus any custom job title an admin typed (e.g. "Store Keeper"). */
@@ -21,6 +21,7 @@ export type User = {
   email: string | null;
   name: string | null;
   dept: string | null;
+  phone?: string | null;
   role: Role;
   active: number;
 };
@@ -39,30 +40,32 @@ const DEPT_ACTIONS: Record<string, string[]> = {
 };
 
 export type Action =
-  | 'order' | 'ovr' | 'settings' | 'users' | 'delete'
+  | 'order' | 'ovr' | 'settings' | 'users' | 'delete' | 'approve'
   | 'des' | 'apr' | 'mat' | 'ps' | 'pf' | 'qc' | 'dsp' | 'disp';
 
-export function can(u: User | null, action: Action): boolean {
+export function can(u: User | null, action: Action, access?: AccessMap): boolean {
   if (!u || !u.active) return false;
-  // Owner, Admin and Manager are the full-control roles.
-  if (u.role === 'owner' || u.role === 'admin' || u.role === 'manager') return true;
-  if (u.role === 'viewer') return false;
+  // The owner is never limited, whatever the matrix says.
+  if (u.role === 'owner') return true;
+  const map = access || DEFAULT_ACCESS;
+  const preset = map[u.role];
+  if (preset) return preset.includes(action);
   // Any custom role falls through to the department rules below, i.e. it has
   // Editor-level access scoped to its own department.
-  if (action === 'users' || action === 'settings') return false;
+  if (action === 'users' || action === 'settings' || action === 'approve') return false;
   if (!u.dept) return false;
-  const preset = DEPT_ACTIONS[u.dept];
+  const dept = DEPT_ACTIONS[u.dept];
   // A department typed by hand has no preset mapping: it gets the stage-level
   // actions only, never settings, accounts or deletion.
-  if (!preset) return (['des', 'apr', 'mat', 'ps', 'pf', 'qc', 'dsp', 'disp'] as Action[]).includes(action);
-  return preset.includes(action);
+  if (!dept) return (['des', 'apr', 'mat', 'ps', 'pf', 'qc', 'dsp', 'disp'] as Action[]).includes(action);
+  return dept.includes(action);
 }
 
 /** Everything this user may do, for the UI to enable/disable controls. */
-export function capabilities(u: User | null): Record<string, boolean> {
-  const all: Action[] = ['order', 'ovr', 'settings', 'users', 'delete', 'des', 'apr', 'mat', 'ps', 'pf', 'qc', 'dsp', 'disp'];
+export function capabilities(u: User | null, access?: AccessMap): Record<string, boolean> {
+  const all: Action[] = ['order', 'ovr', 'settings', 'users', 'delete', 'approve', 'des', 'apr', 'mat', 'ps', 'pf', 'qc', 'dsp', 'disp'];
   const out: Record<string, boolean> = {};
-  for (const a of all) out[a] = can(u, a);
+  for (const a of all) out[a] = can(u, a, access);
   return out;
 }
 
@@ -93,13 +96,13 @@ export async function saveSettings(db: D1Database, s: Settings, by: string): Pro
 // ---------------- users ----------------
 export async function listUsers(db: D1Database): Promise<User[]> {
   const { results } = await db
-    .prepare('SELECT sub, email, name, dept, role, active FROM users ORDER BY (role = \'owner\') DESC, name')
+    .prepare('SELECT sub, email, name, dept, phone, role, active FROM users ORDER BY (role = \'owner\') DESC, name')
     .all<User>();
   return results || [];
 }
 
 export async function getUser(db: D1Database, sub: string): Promise<User | null> {
-  return await db.prepare('SELECT sub, email, name, dept, role, active FROM users WHERE sub = ?').bind(sub).first<User>();
+  return await db.prepare('SELECT sub, email, name, dept, phone, role, active FROM users WHERE sub = ?').bind(sub).first<User>();
 }
 
 export type AuthRow = User & { pass_hash: string | null };
@@ -107,7 +110,7 @@ export type AuthRow = User & { pass_hash: string | null };
 /** Looks up a login row by email (case-insensitive). */
 export async function findUserByEmail(db: D1Database, email: string): Promise<AuthRow | null> {
   return await db
-    .prepare('SELECT sub, email, name, dept, role, active, pass_hash FROM users WHERE lower(email) = lower(?)')
+    .prepare('SELECT sub, email, name, dept, phone, role, active, pass_hash FROM users WHERE lower(email) = lower(?)')
     .bind(email)
     .first<AuthRow>();
 }
@@ -120,17 +123,17 @@ export async function noUsersYet(db: D1Database): Promise<boolean> {
 
 export async function createUser(
   db: D1Database,
-  u: { sub: string; email: string; name: string | null; dept: string | null; role: Role; passHash: string },
+  u: { sub: string; email: string; name: string | null; dept: string | null; phone?: string | null; role: Role; passHash: string },
 ): Promise<User> {
   const at = nowISO();
   await db
     .prepare(
-      `INSERT INTO users (sub, email, name, dept, role, active, pass_hash, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)`,
+      `INSERT INTO users (sub, email, name, dept, phone, role, active, pass_hash, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`,
     )
-    .bind(u.sub, u.email, u.name, u.dept, u.role, u.passHash, at, at)
+    .bind(u.sub, u.email, u.name, u.dept, u.phone || null, u.role, u.passHash, at, at)
     .run();
-  return { sub: u.sub, email: u.email, name: u.name, dept: u.dept, role: u.role, active: 1 };
+  return { sub: u.sub, email: u.email, name: u.name, dept: u.dept, phone: u.phone || null, role: u.role, active: 1 };
 }
 
 export async function setPassword(db: D1Database, sub: string, passHash: string): Promise<void> {
@@ -149,7 +152,7 @@ export async function createSession(db: D1Database, sub: string, tokenHash: stri
 export async function sessionUser(db: D1Database, tokenHash: string): Promise<User | null> {
   const row = await db
     .prepare(
-      `SELECT u.sub, u.email, u.name, u.dept, u.role, u.active
+      `SELECT u.sub, u.email, u.name, u.dept, u.phone, u.role, u.active
          FROM sessions s JOIN users u ON u.sub = s.sub
         WHERE s.token_hash = ? AND s.expires_at > ?`,
     )
@@ -200,15 +203,16 @@ export async function ensureUser(
 export async function updateUser(
   db: D1Database,
   sub: string,
-  patch: { dept?: string | null; role?: Role; active?: number },
+  patch: { dept?: string | null; role?: Role; active?: number; phone?: string | null },
 ): Promise<void> {
   const u = await getUser(db, sub);
   if (!u) throw new Error('User not found');
   const dept = patch.dept === undefined ? u.dept : patch.dept;
   const role = patch.role === undefined ? u.role : patch.role;
   const active = patch.active === undefined ? u.active : patch.active;
-  await db.prepare('UPDATE users SET dept = ?, role = ?, active = ?, updated_at = ? WHERE sub = ?')
-    .bind(dept, role, active, nowISO(), sub).run();
+  const phone = patch.phone === undefined ? (u.phone ?? null) : patch.phone;
+  await db.prepare('UPDATE users SET dept = ?, phone = ?, role = ?, active = ?, updated_at = ? WHERE sub = ?')
+    .bind(dept, phone, role, active, nowISO(), sub).run();
 }
 
 // ---------------- access requests ----------------

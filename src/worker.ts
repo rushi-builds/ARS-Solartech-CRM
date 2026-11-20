@@ -26,6 +26,7 @@ import {
   verifyPassword,
 } from './auth';
 import {
+  ACCESS_ACTIONS,
   DEFAULT_SETTINGS,
   DEPTS,
   STAGE_META,
@@ -86,7 +87,7 @@ export interface Env {
   APP_ORIGIN?: string;
 }
 
-type Ctx = { Bindings: Env; Variables: { user: User } };
+type Ctx = { Bindings: Env; Variables: { user: User; caps: Record<string, boolean> } };
 
 const ROLES: Role[] = ['owner', 'admin', 'manager', 'editor', 'viewer'];
 
@@ -213,6 +214,10 @@ app.use('/api/*', async (c, next) => {
     return c.json({ error: 'signin_required', message: 'Sign in required', needsSetup: await noUsersYet(c.env.DB) }, 401);
   }
   c.set('user', user);
+  // Permissions come from the matrix an admin edits in Settings, resolved once
+  // per request so every guard below sees the same answer.
+  const settings = await getSettings(c.env.DB);
+  c.set('caps', capabilities(user, settings.access));
   await next();
 });
 
@@ -228,8 +233,8 @@ app.use('/api/*', async (c, next) => {
 
 // ---------------------------------------------------------------- helpers
 function guard(c: any, action: Action) {
-  const u: User = c.get('user');
-  if (!can(u, action)) {
+  const caps: Record<string, boolean> = c.get('caps') || {};
+  if (!caps[action]) {
     return c.json({ error: 'forbidden', message: `Your role/department cannot perform "${action}"` }, 403);
   }
   return null;
@@ -276,7 +281,7 @@ async function deptRoster(db: D1Database): Promise<RosterPerson[]> {
   const out: RosterPerson[] = [];
   for (const u of users) {
     if (!u.dept || !u.active) continue;
-    out.push({ id: 'acct-' + u.sub, dept: u.dept, name: u.name, email: u.email, phone: null, sub: u.sub, account: true });
+    out.push({ id: 'acct-' + u.sub, dept: u.dept, name: u.name, email: u.email, phone: u.phone || null, sub: u.sub, account: true });
   }
   for (const p of people) {
     out.push({ id: p.id, dept: p.dept, name: p.name, email: p.email, phone: p.phone, sub: p.sub, account: false });
@@ -336,7 +341,7 @@ async function snapshot(c: any) {
   const today = todayISO();
   const enriched = enrich(orders, stages, dispatches, settings, heads, today);
   const dash = dashboard(enriched, 16, settings);
-  const caps = capabilities(user);
+  const caps = capabilities(user, settings.access);
   // Admins see every request; everyone else only sees their own.
   const accessRequests = await listAccessRequests(db, 60, caps.users ? undefined : user.sub);
   return {
@@ -483,10 +488,9 @@ app.post('/api/orders/:id/stages/:stage/assign', async (c) => {
 
 // Final sign-off from Admin / Manager once every department is finished.
 app.post('/api/orders/:id/approval', async (c) => {
+  const denied = guard(c, 'approve');
+  if (denied) return denied;
   const me: User = c.get('user');
-  if (!['owner', 'admin', 'manager'].includes(me.role)) {
-    return c.json({ error: 'forbidden', message: 'Only Owner, Admin or Manager gives the final approval' }, 403);
-  }
   const id = c.req.param('id');
   const order = await c.env.DB.prepare('SELECT id FROM orders WHERE id = ?').bind(id).first();
   if (!order) return c.json({ error: 'not_found' }, 404);
@@ -605,7 +609,20 @@ function sanitizeSettings(raw: any): Settings {
     tight: Math.round(clamp(raw?.tight, 0, 60, DEFAULT_SETTINGS.tight)),
     off: [...new Set(off as number[])].sort(),
     holidays: [...new Set(holidays as string[])].sort(),
+    access: sanitizeAccess(raw?.access),
   };
+}
+
+/** Who may do what. Owner stays full; a role missing from the payload keeps its default. */
+function sanitizeAccess(raw: any): Record<string, string[]> {
+  const out: Record<string, string[]> = {};
+  for (const role of ['owner', 'admin', 'manager', 'editor', 'viewer']) {
+    const given = raw && Array.isArray(raw[role]) ? raw[role].map(String) : null;
+    const list = given || (DEFAULT_SETTINGS.access as any)[role] || [];
+    out[role] = (ACCESS_ACTIONS as readonly string[]).filter((a) => list.includes(a));
+  }
+  out.owner = [...ACCESS_ACTIONS];
+  return out;
 }
 
 app.put('/api/settings', async (c) => {
@@ -658,6 +675,7 @@ app.post('/api/users', async (c) => {
   }
   const role: Role = roleValue(body.role) || 'viewer';
   const dept = deptName(body.dept);
+  const phone = str(body.phone, 30);
   const name = str(body.name, 80) || email.split('@')[0];
   const me: User = c.get('user');
   const user = await createUser(c.env.DB, {
@@ -665,6 +683,7 @@ app.post('/api/users', async (c) => {
     email,
     name,
     dept,
+    phone,
     role,
     passHash: await hashPassword(String(body.password)),
   });
@@ -685,6 +704,7 @@ app.patch('/api/users/:sub', async (c) => {
   const role = body.role === undefined ? undefined : (roleValue(body.role) ?? undefined);
   const dept = body.dept === undefined ? undefined : deptName(body.dept);
   const active = body.active === undefined ? undefined : body.active ? 1 : 0;
+  const phone = body.phone === undefined ? undefined : str(body.phone, 30);
 
   // The designated super admin keeps full control of the workspace for good.
   if (isRootAdmin(target)) {
@@ -704,7 +724,7 @@ app.patch('/api/users/:sub', async (c) => {
     return c.json({ error: 'self_disable', message: 'You cannot disable your own account' }, 400);
   }
 
-  await updateUser(c.env.DB, sub, { role, dept, active });
+  await updateUser(c.env.DB, sub, { role, dept, active, phone });
   if (typeof body.password === 'string' && body.password) {
     const problem = passwordProblem(body.password);
     if (problem) return c.json({ error: 'weak_password', message: problem }, 400);

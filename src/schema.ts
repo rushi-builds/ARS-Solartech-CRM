@@ -79,6 +79,7 @@ const DDL: string[] = [
 // so each one is applied on its own and treated as done when it already exists.
 const ALTERS: string[] = [
   `ALTER TABLE users ADD COLUMN pass_hash TEXT`,
+  `ALTER TABLE users ADD COLUMN phone TEXT`,
   `ALTER TABLE order_stages ADD COLUMN assigned_sub TEXT`,
   `ALTER TABLE order_stages ADD COLUMN assigned_name TEXT`,
   `ALTER TABLE order_stages ADD COLUMN done_sub TEXT`,

@@ -338,7 +338,7 @@ function renderNotifs() {
       </button>`;
     }).join(''));
   }
-  const awaiting = FULL_ROLES.includes(me.role)
+  const awaiting = cap('approve')
     ? S.d.orders.filter((o) => o.live.rag === 'CLOSED' && o.approval !== 'approved')
     : [];
   if (awaiting.length) {
@@ -728,7 +728,7 @@ function openDrawer(id, silent) {
              <b>Waiting for final approval</b>
              <p class="sub-line" style="margin-top:4px">Every department has finished. Owner / Admin / Manager signs off to close the order.</p>
              <div class="inline" style="margin-top:10px">
-               ${FULL_ROLES.includes(S.d.me.role)
+               ${cap('approve')
                  ? `<button class="btn primary small" data-act="approve-order" data-id="${esc(o.id)}">Give final approval</button>`
                  : '<span class="sub-line">Asked from the admin</span>'}
              </div>
@@ -1044,7 +1044,7 @@ function viewUsers() {
                   <span class="team-ava">${esc(initials(u.name, u.email))}</span>
                   <span>
                     <span class="cust">${esc(u.name || 'Unnamed')}${u.sub === S.d.me.sub ? ' <span class="badge blue">you</span>' : ''}</span>
-                    <small class="sub-line">${esc(u.email || 'no email on account')}</small>
+                    <small class="sub-line">${esc(u.email || 'no email on account')}${u.phone ? ' · ' + esc(u.phone) : ''}</small>
                   </span>
                 </div>
               </td>
@@ -1090,6 +1090,14 @@ function viewSettings() {
   const s = S.d.settings;
   const canEdit = cap('settings');
   const roster = S.d.deptPeople || [];
+  const access = s.access || {};
+  const accessCols = [
+    ['order', 'New order'], ['des', 'Design'], ['apr', 'Drawing'], ['mat', 'Material'],
+    ['ps', 'Prod start'], ['pf', 'Prod done'], ['qc', 'QC'], ['dsp', 'Dispatch ready'],
+    ['disp', 'Dispatch log'], ['ovr', 'Overrides'], ['users', 'Users'], ['settings', 'Settings'],
+    ['approve', 'Final approval'], ['delete', 'Delete'],
+  ];
+  const accessRoles = [['owner', 'Owner · Admin'], ['admin', 'Admin'], ['manager', 'Manager'], ['editor', 'Editor'], ['viewer', 'Viewer']];
 
   return `
   <div class="split">
@@ -1133,15 +1141,9 @@ function viewSettings() {
               ${members.length
                 ? `<div class="member-list">${members.map((m) => `<div class="member">
                      <span class="team-ava">${esc(initials(m.name, m.email))}</span>
-                     <span class="member-main"><b>${esc(m.name || m.email || '—')}</b><small>${esc(m.email || m.phone || '')}${m.account ? ' · account' : ''}</small></span>
-                     ${canEdit && !m.account ? `<button class="icon-btn" data-act="del-dept-person" data-id="${esc(m.id)}" title="Remove">×</button>` : ''}
+                     <span class="member-main"><b>${esc(m.name || m.email || '—')}</b><small>${esc([m.email, m.phone].filter(Boolean).join(' · '))}${m.account ? '' : ' · contact'}</small></span>
                    </div>`).join('')}</div>`
-                : '<p class="sub-line">Nobody yet.</p>'}
-              ${canEdit ? `<div class="inline" style="margin-top:8px">
-                <input data-person="name" data-dept="${esc(d)}" placeholder="Name" style="min-width:0" />
-                <input data-person="email" data-dept="${esc(d)}" placeholder="Email or mobile" style="min-width:0" />
-                <button class="btn ghost small" data-act="add-dept-person" data-dept="${esc(d)}">+ Add</button>
-              </div>` : ''}
+                : '<p class="sub-line">No account in this department yet.</p>'}
             </div>`;
           }).join('')}
         </div>
@@ -1172,6 +1174,31 @@ function viewSettings() {
       </div>
       <p class="sub-line" style="margin-top:14px">Forecast dispatch = latest of approval/material + production days + QC + dispatch. Buffer compares it with the customer due date.</p>
     </div>
+  </div>
+
+  <div class="card flush" style="margin-top:14px">
+    <div class="card-head">
+      <div class="lead">
+        <span class="head-ico grey">${icon('gear')}</span>
+        <div><p class="h-eyebrow">Access control</p><h3>Who can do what</h3></div>
+      </div>
+      <div class="inline">
+        <span class="hint">Owner is always full</span>
+        ${canEdit ? '<button class="btn primary small" data-act="save-access">Save access rules</button>' : ''}
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table class="access-table">
+        <thead><tr><th>Role</th>${accessCols.map(([, label]) => `<th>${esc(label)}</th>`).join('')}</tr></thead>
+        <tbody>
+          ${accessRoles.map(([role, label]) => `<tr>
+            <td class="cust">${esc(label)}</td>
+            ${accessCols.map(([key]) => `<td><input type="checkbox" data-access="${role}" data-act-key="${key}" ${role === 'owner' || (access[role] || []).includes(key) ? 'checked' : ''} ${role === 'owner' || !canEdit ? 'disabled' : ''} /></td>`).join('')}
+          </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>
+    <p class="sub-line" style="margin:6px 18px 16px">Custom roles follow their department: they get the stage columns their department owns — never Users, Settings or final approval. Signing off is the Final approval column.</p>
   </div>`;
 }
 
@@ -1340,6 +1367,7 @@ function addUserModal() {
   const body = `<div class="form-grid">
     ${field('Full name', 'name', '')}
     ${field('Email *', 'email', '', 'email', 'required')}
+    ${field('Mobile', 'phone', '', 'tel', 'autocomplete="tel"')}
     <label class="field"><span>Role</span>
       <select name="role" data-pick="role">
         ${roleChoices().map((r) => `<option value="${esc(r)}"${r === 'viewer' ? ' selected' : ''}>${esc(roleOptionLabel(r))}</option>`).join('')}
@@ -1766,10 +1794,27 @@ const ACTIONS = {
       tight: tight ? Number(tight.value) : S.d.settings.tight,
       off,
       holidays: S.d.settings.holidays,
+      access: S.d.settings.access,
     };
     try {
       const res = await api('/api/settings', 'PUT', body);
       apply(res); render(); toast('Planning settings saved', 'ok');
+    } catch (e) { toast(e.message, 'err'); }
+  },
+  'save-access': async () => {
+    const access = { ...(S.d.settings.access || {}) };
+    $$('[data-access]').forEach((box) => {
+      const role = box.dataset.access;
+      const key = box.dataset.actKey;
+      const list = access[role] ? access[role].slice() : [];
+      const has = list.includes(key);
+      if (box.checked && !has) list.push(key);
+      if (!box.checked && has) list.splice(list.indexOf(key), 1);
+      access[role] = list;
+    });
+    try {
+      const res = await api('/api/settings', 'PUT', { ...S.d.settings, access });
+      apply(res); render(); toast('Access rules saved', 'ok');
     } catch (e) { toast(e.message, 'err'); }
   },
   'save-stakeholders': async () => {
@@ -1807,30 +1852,6 @@ const ACTIONS = {
     render();
   },
   'custom-role': (el) => customRoleModal(el.dataset.id, el.dataset.name || '', el.dataset.current || ''),
-  'add-dept-person': async (el) => {
-    const dept = el.dataset.dept;
-    const box = $$('[data-person]').filter((i) => i.dataset.dept === dept);
-    const nameEl = box.find((i) => i.dataset.person === 'name');
-    const mailEl = box.find((i) => i.dataset.person === 'email');
-    const name = (nameEl && nameEl.value.trim()) || '';
-    const contact = (mailEl && mailEl.value.trim()) || '';
-    if (!name && !contact) return toast('Enter a name or contact first', 'err');
-    const isMail = contact.includes('@');
-    el.disabled = true;
-    try {
-      const res = await api('/api/dept-people', 'POST', {
-        dept, name, email: isMail ? contact : '', phone: isMail ? '' : contact,
-      });
-      apply(res); render(); toast(`${name || contact} added to ${dept}`, 'ok');
-    } catch (e) { toast(e.message, 'err'); el.disabled = false; }
-  },
-  'del-dept-person': async (el) => {
-    if (!confirm('Remove this person from the department?')) return;
-    try {
-      const res = await api('/api/dept-people/' + encodeURIComponent(el.dataset.id), 'DELETE');
-      apply(res); render(); toast('Removed', 'ok');
-    } catch (e) { toast(e.message, 'err'); }
-  },
   'approve-order': async (el) => {
     el.disabled = true;
     try {
