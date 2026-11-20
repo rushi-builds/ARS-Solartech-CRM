@@ -99,6 +99,21 @@ CREATE TABLE IF NOT EXISTS dispatches (
   updated_at  TEXT
 );
 
+CREATE TABLE IF NOT EXISTS access_requests (
+  id            TEXT PRIMARY KEY,
+  sub           TEXT NOT NULL,
+  email         TEXT,
+  name          TEXT,
+  ask_role      TEXT,
+  ask_dept      TEXT,
+  note          TEXT,
+  status        TEXT NOT NULL DEFAULT 'pending',   -- pending | approved | denied
+  created_at    TEXT NOT NULL,
+  decided_at    TEXT,
+  decided_by    TEXT,
+  decision_note TEXT
+);
+
 CREATE TABLE IF NOT EXISTS events (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   at          TEXT NOT NULL,

@@ -4,7 +4,17 @@ import {
 } from './plan';
 
 /** Presets plus any custom job title an admin typed (e.g. "Store Keeper"). */
-export type Role = 'owner' | 'admin' | 'editor' | 'viewer' | (string & {});
+export type Role = 'owner' | 'admin' | 'manager' | 'editor' | 'viewer' | (string & {});
+
+/**
+ * The designated super admin. This account is always the owner, can never be
+ * demoted or disabled, and is promoted automatically on sign-in.
+ */
+export const ROOT_ADMIN_EMAIL = 'rushidhumal.04@gmail.com';
+
+export function isRootAdmin(u: { email?: string | null } | null): boolean {
+  return !!u && String(u.email || '').trim().toLowerCase() === ROOT_ADMIN_EMAIL;
+}
 
 export type User = {
   sub: string;
@@ -34,7 +44,8 @@ export type Action =
 
 export function can(u: User | null, action: Action): boolean {
   if (!u || !u.active) return false;
-  if (u.role === 'owner' || u.role === 'admin') return true;
+  // Owner, Admin and Manager are the full-control roles.
+  if (u.role === 'owner' || u.role === 'admin' || u.role === 'manager') return true;
   if (u.role === 'viewer') return false;
   // Any custom role falls through to the department rules below, i.e. it has
   // Editor-level access scoped to its own department.
@@ -194,6 +205,64 @@ export async function updateUser(
   const active = patch.active === undefined ? u.active : patch.active;
   await db.prepare('UPDATE users SET dept = ?, role = ?, active = ?, updated_at = ? WHERE sub = ?')
     .bind(dept, role, active, nowISO(), sub).run();
+}
+
+// ---------------- access requests ----------------
+// A person without enough access asks for a role/department; an admin approves
+// or denies from the notification panel or the Users & roles page.
+export type AccessRequest = {
+  id: string;
+  sub: string;
+  email: string | null;
+  name: string | null;
+  ask_role: string | null;
+  ask_dept: string | null;
+  note: string | null;
+  status: 'pending' | 'approved' | 'denied';
+  created_at: string;
+  decided_at: string | null;
+  decided_by: string | null;
+  decision_note: string | null;
+};
+
+export async function listAccessRequests(db: D1Database, limit = 60, sub?: string): Promise<AccessRequest[]> {
+  const cols = 'id, sub, email, name, ask_role, ask_dept, note, status, created_at, decided_at, decided_by, decision_note';
+  const sql = sub
+    ? `SELECT ${cols} FROM access_requests WHERE sub = ? ORDER BY (status = 'pending') DESC, created_at DESC LIMIT ?`
+    : `SELECT ${cols} FROM access_requests ORDER BY (status = 'pending') DESC, created_at DESC LIMIT ?`;
+  const stmt = sub ? db.prepare(sql).bind(sub, limit) : db.prepare(sql).bind(limit);
+  const { results } = await stmt.all<AccessRequest>();
+  return results || [];
+}
+
+export async function getAccessRequest(db: D1Database, id: string): Promise<AccessRequest | null> {
+  return await db.prepare('SELECT * FROM access_requests WHERE id = ?').bind(id).first<AccessRequest>();
+}
+
+export async function createAccessRequest(
+  db: D1Database,
+  r: { id: string; sub: string; email: string | null; name: string | null; ask_role: string | null; ask_dept: string | null; note: string | null },
+): Promise<void> {
+  await db
+    .prepare(
+      `INSERT INTO access_requests (id, sub, email, name, ask_role, ask_dept, note, status, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
+    )
+    .bind(r.id, r.sub, r.email, r.name, r.ask_role, r.ask_dept, r.note, nowISO())
+    .run();
+}
+
+export async function decideAccessRequest(
+  db: D1Database,
+  id: string,
+  status: 'approved' | 'denied',
+  by: string,
+  note: string | null,
+): Promise<void> {
+  await db
+    .prepare('UPDATE access_requests SET status = ?, decided_at = ?, decided_by = ?, decision_note = ? WHERE id = ?')
+    .bind(status, nowISO(), by, note, id)
+    .run();
 }
 
 // ---------------- stakeholders ----------------

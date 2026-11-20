@@ -84,6 +84,10 @@ const icon = (name) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColo
 /* ── state ─────────────────────────────────────────────────── */
 const S = { d: null, view: 'dashboard', q: '', status: 'all', rag: 'all', stage: 'all', open: null };
 
+/* The designated super admin account: always owner, never demotable. */
+const SUPER_ADMIN_EMAIL = 'rushidhumal.04@gmail.com';
+const FULL_ROLES = ['owner', 'admin', 'manager'];
+
 const VIEWS = {
   dashboard: { title: 'Dashboard', sub: 'Live pipeline, overdue stages and plant load', icon: 'grid' },
   orders: { title: 'Orders', sub: 'Every order with its stage, forecast and buffer', icon: 'box' },
@@ -252,6 +256,8 @@ function render() {
   const canUsers = cap('users') || cap('settings');
   $('#menuUsers').hidden = !canUsers;
   $('#menuSettings').hidden = !cap('settings') && !cap('users');
+  const menuAccess = $('#menuAccess');
+  if (menuAccess) menuAccess.hidden = cap('users');
   renderNotifs();
 
   renderNav();
@@ -282,8 +288,36 @@ function renderNotifs() {
   const list = $('#notifList');
   if (!list) return;
   const k = S.d.dashboard.kpis;
-  const attention = (S.d.dashboard.attention || []).slice(0, 8);
-  list.innerHTML = attention.length
+  const attention = (S.d.dashboard.attention || []).slice(0, 6);
+  const reqs = S.d.accessRequests || [];
+  const pending = reqs.filter((r) => r.status === 'pending');
+  const canDecide = cap('users');
+  const parts = [];
+
+  if (pending.length && canDecide) {
+    parts.push(`<div class="pop-section">Access requests · ${pending.length}</div>`);
+    parts.push(pending.map((r) => `<div class="notif-item blue static">
+      <span class="n-dot"></span>
+      <span>
+        <span class="n-title">${esc(r.name || r.email || 'User')}</span>
+        <span class="n-sub">${esc(reqAsk(r))}${r.note ? ' · ' + esc(r.note) : ''}</span>
+        <span class="req-actions">
+          <button class="btn primary small" data-act="req-approve" data-id="${esc(r.id)}">Approve</button>
+          <button class="btn ghost small" data-act="req-deny" data-id="${esc(r.id)}">Deny</button>
+        </span>
+      </span>
+    </div>`).join(''));
+  } else if (pending.length) {
+    parts.push('<div class="pop-section">Your request</div>');
+    parts.push(pending.map((r) => `<div class="notif-item amber static">
+      <span class="n-dot"></span>
+      <span><span class="n-title">Waiting for approval</span>
+      <span class="n-sub">${esc(reqAsk(r))} · sent ${fmt(String(r.created_at).slice(0, 10))}</span></span>
+    </div>`).join(''));
+  }
+
+  parts.push('<div class="pop-section">Pipeline alerts</div>');
+  parts.push(attention.length
     ? attention.map((a) => {
       const tone = a.daysOverdue > 0 || a.rag === 'RED' ? 'red' : 'amber';
       const sub = a.daysOverdue > 0
@@ -294,11 +328,26 @@ function renderNotifs() {
         <span><span class="n-title">${esc(a.customer || a.id)}</span><span class="n-sub">${esc(sub)}</span></span>
       </button>`;
     }).join('')
-    : '<div class="pop-empty">You are all caught up. No stage is past its planned date.</div>';
+    : '<div class="pop-empty">You are all caught up. No stage is past its planned date.</div>');
+
+  list.innerHTML = parts.join('');
   const badge = $('#notifCount');
-  if (badge) { badge.textContent = attention.length; badge.hidden = !attention.length; }
+  const total = attention.length + (canDecide ? pending.length : 0);
+  if (badge) { badge.textContent = total; badge.hidden = !total; }
   const sub = $('#notifSub');
-  if (sub) sub.textContent = attention.length ? `${attention.length} open` : `${k.red} red · ${k.overdue} late`;
+  if (sub) {
+    const bits = [];
+    if (pending.length) bits.push(`${pending.length} request${pending.length === 1 ? '' : 's'}`);
+    bits.push(`${k.overdue} late · ${k.red} red`);
+    sub.textContent = bits.join(' · ');
+  }
+}
+
+function reqAsk(r) {
+  const bits = [];
+  if (r.ask_role) bits.push(roleLabel(r.ask_role));
+  if (r.ask_dept) bits.push(r.ask_dept);
+  return bits.length ? 'Wants ' + bits.join(' · ') : 'Requested access';
 }
 
 function renderNav() {
@@ -318,7 +367,7 @@ function renderNav() {
 }
 
 function roleLabel(role) {
-  return ({ owner: 'Admin', admin: 'Admin', editor: 'Editor', viewer: 'Viewer' })[role] || role || 'Viewer';
+  return ({ owner: 'Admin', admin: 'Admin', manager: 'Manager', editor: 'Editor', viewer: 'Viewer' })[role] || role || 'Viewer';
 }
 
 function greeting() {
@@ -443,6 +492,9 @@ function viewDashboard() {
       <div class="inline">
         ${Object.entries(S.d.capabilities).filter(([, v]) => v).map(([a]) => `<span class="badge blue">${esc(actionLabel(a))}</span>`).join('') || '<span class="sub-line">View only — ask an admin for a department.</span>'}
       </div>
+      ${FULL_ROLES.includes(S.d.me.role)
+        ? '<p class="sub-line" style="margin-top:11px">Full control · you can change anyone\'s role from Users &amp; roles.</p>'
+        : '<button class="btn ghost small" data-act="request-access" style="margin-top:11px">Request more access</button>'}
     </div>
     </div>
   </div>
@@ -826,9 +878,27 @@ function viewUsers() {
   const canManage = cap('users');
   const depts = S.d.meta.depts;
   const owner = users.find((u) => u.role === 'owner');
-  const presets = ['admin', 'editor', 'viewer'];
+  const presets = ['admin', 'manager', 'editor', 'viewer'];
   const customs = [...new Set(users.map((u) => u.role))]
     .filter((r) => r && r !== 'owner' && !presets.includes(r));
+  const reqs = S.d.accessRequests || [];
+  const pending = reqs.filter((r) => r.status === 'pending');
+  const decided = reqs.filter((r) => r.status !== 'pending').slice(0, 5);
+
+  const reqRow = (r, withActions) => `<div class="req-row">
+    <span class="team-ava">${esc(initials(r.name, r.email))}</span>
+    <div class="req-main">
+      <b>${esc(r.name || r.email || 'User')}</b>
+      <span>${esc(reqAsk(r))}${r.note ? ' — ' + esc(r.note) : ''}</span>
+      <em>${esc(String(r.created_at).slice(0, 16).replace('T', ' '))}</em>
+    </div>
+    ${withActions
+      ? `<div class="req-actions">
+           <button class="btn primary small" data-act="req-approve" data-id="${esc(r.id)}">Approve</button>
+           <button class="btn ghost small" data-act="req-deny" data-id="${esc(r.id)}">Deny</button>
+         </div>`
+      : `<span class="badge ${r.status === 'approved' ? 'green' : 'grey'}">${esc(r.status)}</span>`}
+  </div>`;
 
   const roleList = (current) => {
     const list = presets.slice();
@@ -839,6 +909,23 @@ function viewUsers() {
   };
 
   return `
+  <div class="card flush" style="margin-bottom:14px">
+    <div class="card-head">
+      <div class="lead">
+        <span class="head-ico">${icon('users')}</span>
+        <div><p class="h-eyebrow">Access control</p><h3>Access requests</h3></div>
+      </div>
+      <div class="inline">
+        <span class="badge ${pending.length ? 'amber' : 'grey'}">${pending.length} pending</span>
+        ${canManage ? '<button class="btn ghost small" data-act="request-access">Request for someone</button>' : '<button class="btn primary small" data-act="request-access">Request access</button>'}
+      </div>
+    </div>
+    ${pending.length
+      ? `<div class="req-list">${pending.map((r) => reqRow(r, canManage)).join('')}</div>`
+      : '<div class="empty">No open requests. A person who needs more access can ask for it themselves and it lands here.</div>'}
+    ${decided.length ? `<div class="req-list decided">${decided.map((r) => reqRow(r, false)).join('')}</div>` : ''}
+  </div>
+
   <div class="grid cols-2" style="margin-bottom:14px">
     <div class="card">
       <div class="card-head">
@@ -853,6 +940,7 @@ function viewUsers() {
         <li><b>They sign in</b><span>Same URL, their own credentials.</span></li>
         <li><b>Department + role</b><span>Set on the row; applied on their next click.</span></li>
         <li><b>The server enforces it</b><span>Every action is re-checked on the Worker, not in the browser.</span></li>
+        <li><b>They can ask for more</b><span>Request access from the account menu; an admin approves or denies it.</span></li>
       </ol>
     </div>
     <div class="card">
@@ -863,7 +951,8 @@ function viewUsers() {
         </div>
       </div>
       <div class="role-cat">
-        <div class="role-card"><b>Admin</b><span>Everything: orders, settings, users and delete.</span></div>
+        <div class="role-card"><b>Admin · owner</b><span>God-level: every order, setting, account and deletion.</span></div>
+        <div class="role-card"><b>Manager</b><span>Full control too — orders, settings, roles and access requests.</span></div>
         <div class="role-card"><b>Editor</b><span>Only their department's stages and dispatch log.</span></div>
         <div class="role-card"><b>Viewer</b><span>Read only across the workspace.</span></div>
         ${customs.map((r) => `<div class="role-card custom"><b>${esc(r)}</b><span>Custom role · works like Editor, limited to the assigned department.</span></div>`).join('')}
@@ -894,7 +983,7 @@ function viewUsers() {
                 <div class="who">
                   <span class="team-ava">${esc(initials(u.name, u.email))}</span>
                   <span>
-                    <span class="cust">${esc(u.name || 'Unnamed')}${u.sub === S.d.me.sub ? ' <span class="badge blue">you</span>' : ''}</span>
+                    <span class="cust">${esc(u.name || 'Unnamed')}${u.sub === S.d.me.sub ? ' <span class="badge blue">you</span>' : ''}${(u.email || '').toLowerCase() === SUPER_ADMIN_EMAIL ? ' <span class="badge amber">super admin</span>' : ''}</span>
                     <small class="sub-line">${esc(u.email || 'no email on account')}</small>
                   </span>
                 </div>
@@ -908,6 +997,8 @@ function viewUsers() {
               <td>
                 ${isOwner
                   ? '<span class="badge amber">Admin · owner</span>'
+                  : (u.email || '').toLowerCase() === SUPER_ADMIN_EMAIL
+                    ? '<span class="badge amber">Admin · owner</span>'
                   : `<select class="role-input" data-user-role="${esc(u.sub)}" data-current="${esc(u.role)}" ${canManage ? '' : 'disabled'}>
                        ${roleList(u.role)}
                      </select>`}
@@ -1175,8 +1266,8 @@ function addUserModal() {
     <label class="field"><span>Role</span>
       <input name="role" list="roleIdeasAdd" value="Viewer" autocomplete="off" placeholder="Type or pick a role" />
       <datalist id="roleIdeasAdd">
-        <option value="Admin"></option><option value="Editor"></option><option value="Viewer"></option>
-        ${[...new Set(S.d.users.map((u) => u.role))].filter((r) => r && !['owner', 'admin', 'editor', 'viewer'].includes(r)).map((r) => `<option value="${esc(r)}"></option>`).join('')}
+        <option value="Admin"></option><option value="Manager"></option><option value="Editor"></option><option value="Viewer"></option>
+        ${[...new Set(S.d.users.map((u) => u.role))].filter((r) => r && !['owner', 'admin', 'manager', 'editor', 'viewer'].includes(r)).map((r) => `<option value="${esc(r)}"></option>`).join('')}
       </datalist>
     </label>
     ${selectField('Department', 'dept', '', [['', '— none —'], ...depts.map((d) => [d, d])])}
@@ -1202,7 +1293,7 @@ function addUserModal() {
 }
 
 function customRoleModal(sub, name, current) {
-  const presetNames = ['admin', 'editor', 'viewer', 'owner'];
+  const presetNames = ['admin', 'manager', 'editor', 'viewer', 'owner'];
   const seed = current && !presetNames.includes(current.toLowerCase()) ? current : '';
   const body = `<div class="form-grid">
     <label class="field wide"><span>Role name *</span>
@@ -1232,6 +1323,40 @@ function customRoleModal(sub, name, current) {
       closeModal();
       render();
       toast(`Role set to ${role}`, 'ok');
+    },
+  });
+}
+
+function requestAccessModal() {
+  const me = S.d.me;
+  const ideas = [...new Set([...FULL_ROLES.filter((r) => r !== 'owner'), 'editor', 'viewer', ...(S.d.meta.customRoles || [])])];
+  const body = `<div class="form-grid">
+    <label class="field"><span>Role you need</span>
+      <input name="role" list="roleAsk" autocomplete="off" placeholder="e.g. Editor, Store Keeper" />
+      <datalist id="roleAsk">${ideas.map((r) => `<option value="${esc(roleLabel(r))}"></option>`).join('')}</datalist>
+    </label>
+    ${selectField('Department', 'dept', '', [['', '— keep current —'], ...S.d.meta.depts.map((d) => [d, d])])}
+    <label class="field wide"><span>What do you need to do?</span>
+      <textarea name="note" placeholder="e.g. I mark material receipts for Stores"></textarea>
+    </label>
+  </div>
+  <p class="sub-line" style="margin-top:10px">Signed in as <strong>${esc(me.name || me.email || '')}</strong> · ${esc(roleLabel(me.role))}${me.dept ? ' · ' + esc(me.dept) : ''}. An Admin or Manager sees this in Notifications and Users &amp; roles; your access changes the moment they approve.</p>`;
+
+  modal({
+    title: 'Request access',
+    sub: 'Ask for the role or department you are missing.',
+    body,
+    submit: 'Send request',
+    wide: true,
+    async onSubmit(data) {
+      const role = String(data.role || '').trim();
+      const dept = String(data.dept || '').trim();
+      if (!role && !dept) throw new Error('Pick a role or a department');
+      const res = await api('/api/access-requests', 'POST', { role, dept, note: data.note });
+      apply(res);
+      closeModal();
+      render();
+      toast('Request sent to the admins', 'ok');
     },
   });
 }
@@ -1551,6 +1676,22 @@ const ACTIONS = {
     render();
   },
   'custom-role': (el) => customRoleModal(el.dataset.id, el.dataset.name || '', el.dataset.current || ''),
+  'request-access': () => requestAccessModal(),
+  'req-approve': async (el) => {
+    el.disabled = true;
+    try {
+      const res = await api('/api/access-requests/' + encodeURIComponent(el.dataset.id) + '/decision', 'POST', { decision: 'approve' });
+      apply(res); render(); toast('Access granted', 'ok');
+    } catch (e) { toast(e.message, 'err'); el.disabled = false; }
+  },
+  'req-deny': async (el) => {
+    if (!confirm('Deny this access request?')) return;
+    el.disabled = true;
+    try {
+      const res = await api('/api/access-requests/' + encodeURIComponent(el.dataset.id) + '/decision', 'POST', { decision: 'deny' });
+      apply(res); render(); toast('Request denied', 'ok');
+    } catch (e) { toast(e.message, 'err'); el.disabled = false; }
+  },
   notif: () => togglePanel('#notifPanel'),
   account: () => togglePanel('#accountMenu'),
   theme: () => toggleTheme(),

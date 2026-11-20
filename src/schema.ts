@@ -43,6 +43,12 @@ const DDL: string[] = [
     eway TEXT, lr TEXT, qc_ref TEXT, remarks TEXT,
     created_at TEXT NOT NULL, created_by TEXT, updated_at TEXT
   )`,
+  `CREATE TABLE IF NOT EXISTS access_requests (
+    id TEXT PRIMARY KEY, sub TEXT NOT NULL, email TEXT, name TEXT,
+    ask_role TEXT, ask_dept TEXT, note TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at TEXT NOT NULL, decided_at TEXT, decided_by TEXT, decision_note TEXT
+  )`,
   `CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, actor_sub TEXT,
     actor_name TEXT, entity TEXT NOT NULL, entity_id TEXT,
@@ -55,6 +61,8 @@ const DDL: string[] = [
   `CREATE INDEX IF NOT EXISTS idx_events_at ON events(at DESC)`,
   `CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)`,
   `CREATE INDEX IF NOT EXISTS idx_sessions_sub ON sessions(sub)`,
+  `CREATE INDEX IF NOT EXISTS idx_access_status ON access_requests(status, created_at DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_access_sub ON access_requests(sub)`,
 ];
 
 // Columns added after the first release. SQLite has no ADD COLUMN IF NOT EXISTS,

@@ -37,7 +37,9 @@ import {
 import {
   can,
   capabilities,
+  createAccessRequest,
   dashboard,
+  decideAccessRequest,
   deleteDispatch,
   deleteOrder,
   enrich,
@@ -46,6 +48,9 @@ import {
   createUser,
   deleteSession,
   findUserByEmail,
+  getAccessRequest,
+  isRootAdmin,
+  listAccessRequests,
   noUsersYet,
   purgeSessions,
   sessionUser,
@@ -78,7 +83,7 @@ export interface Env {
 
 type Ctx = { Bindings: Env; Variables: { user: User } };
 
-const ROLES: Role[] = ['owner', 'admin', 'editor', 'viewer'];
+const ROLES: Role[] = ['owner', 'admin', 'manager', 'editor', 'viewer'];
 
 /**
  * Preset roles, or a custom job title an admin typed. "owner" is reserved for
@@ -89,7 +94,7 @@ function roleValue(v: unknown): Role | null {
   if (!s) return null;
   const low = s.toLowerCase();
   if (low === 'owner') return null;
-  if (low === 'admin' || low === 'editor' || low === 'viewer') return low;
+  if (low === 'admin' || low === 'manager' || low === 'editor' || low === 'viewer') return low;
   return /^[A-Za-z][A-Za-z0-9 &/._-]{0,39}$/.test(s) ? s : null;
 }
 
@@ -166,6 +171,14 @@ app.post('/api/auth/login', async (c) => {
 
   await purgeSessions(c.env.DB);
   const user: User = { sub: row.sub, email: row.email, name: row.name, dept: row.dept, role: row.role, active: row.active };
+  // The designated super admin always comes back as owner, even if a row in an
+  // older database still points at another role.
+  if (isRootAdmin(user) && user.role !== 'owner') {
+    await updateUser(c.env.DB, user.sub, { role: 'owner' });
+    user.role = 'owner';
+    await logEvent(c.env.DB, { sub: user.sub, name: user.name }, 'user', user.sub, 'role',
+      'Super admin restored to owner');
+  }
   await startSession(c, user);
   await logEvent(c.env.DB, { sub: user.sub, name: user.name }, 'user', user.sub, 'signin',
     `${user.name || email} signed in`);
@@ -277,9 +290,12 @@ async function snapshot(c: any) {
   const today = todayISO();
   const enriched = enrich(orders, stages, dispatches, settings, heads, today);
   const dash = dashboard(enriched, 16, settings);
+  const caps = capabilities(user);
+  // Admins see every request; everyone else only sees their own.
+  const accessRequests = await listAccessRequests(db, 60, caps.users ? undefined : user.sub);
   return {
     me: user,
-    capabilities: capabilities(user),
+    capabilities: caps,
     settings,
     orders: enriched,
     dispatches,
@@ -287,6 +303,7 @@ async function snapshot(c: any) {
     users,
     activity: await listEvents(db, 120),
     dashboard: dash,
+    accessRequests,
     today,
     meta: {
       stages: STAGE_META,
@@ -294,6 +311,7 @@ async function snapshot(c: any) {
       roles: ROLES,
       customRoles: [...new Set(users.map((u) => u.role))]
         .filter((r) => r && !ROLES.includes(r)),
+      pendingRequests: accessRequests.filter((r) => r.status === 'pending').length,
     },
   };
 }
@@ -522,6 +540,16 @@ app.patch('/api/users/:sub', async (c) => {
   const dept = body.dept === undefined ? undefined : (body.dept && DEPTS.includes(body.dept) ? body.dept : null);
   const active = body.active === undefined ? undefined : body.active ? 1 : 0;
 
+  // The designated super admin keeps full control of the workspace for good.
+  if (isRootAdmin(target)) {
+    if (role && role !== 'owner') {
+      return c.json({ error: 'protected_account', message: 'The super admin account always stays Admin' }, 400);
+    }
+    if (active === 0) {
+      return c.json({ error: 'protected_account', message: 'The super admin account cannot be disabled' }, 400);
+    }
+  }
+
   if (target.role === 'owner' && (role && role !== 'owner')) {
     const owners = await c.env.DB.prepare("SELECT COUNT(*) AS n FROM users WHERE role = 'owner' AND active = 1").first<{ n: number }>();
     if ((owners?.n || 0) <= 1) return c.json({ error: 'last_owner', message: 'There must always be one active Admin account' }, 400);
@@ -540,6 +568,70 @@ app.patch('/api/users/:sub', async (c) => {
   }
   await logEvent(c.env.DB, { sub: me.sub, name: me.name }, 'user', sub, 'update',
     `${target.name || target.email || sub}: role=${role ?? target.role}, dept=${dept ?? '-'}, active=${active ?? target.active}`);
+  return c.json({ ok: true, snapshot: await snapshot(c) });
+});
+
+// ---------------------------------------------------------------- access requests
+app.post('/api/access-requests', async (c) => {
+  const me: User = c.get('user');
+  const body = await c.req.json().catch(() => ({}));
+  const askRole = str(body.role, 40) ? roleValue(body.role) : null;
+  if (str(body.role, 40) && !askRole) {
+    return c.json({ error: 'bad_role', message: 'That role name is not allowed' }, 400);
+  }
+  const askDept = body.dept && DEPTS.includes(String(body.dept)) ? String(body.dept) : null;
+  if (!askRole && !askDept) {
+    return c.json({ error: 'nothing_requested', message: 'Pick a role or a department to request' }, 400);
+  }
+  const open = await c.env.DB
+    .prepare("SELECT 1 AS x FROM access_requests WHERE sub = ? AND status = 'pending'")
+    .bind(me.sub)
+    .first();
+  if (open) {
+    return c.json({ error: 'already_pending', message: 'You already have a request waiting for approval' }, 409);
+  }
+  const note = str(body.note, 300);
+  await createAccessRequest(c.env.DB, {
+    id: crypto.randomUUID(),
+    sub: me.sub,
+    email: me.email,
+    name: me.name,
+    ask_role: askRole,
+    ask_dept: askDept,
+    note,
+  });
+  await logEvent(c.env.DB, { sub: me.sub, name: me.name }, 'access', me.sub, 'request',
+    `${me.name || me.email || 'user'} requested ${askRole || 'access'}${askDept ? ' · ' + askDept : ''}${note ? ' — ' + note : ''}`);
+  return c.json({ ok: true, snapshot: await snapshot(c) });
+});
+
+app.post('/api/access-requests/:id/decision', async (c) => {
+  const denied = guard(c, 'users');
+  if (denied) return denied;
+  const id = c.req.param('id');
+  const req = await getAccessRequest(c.env.DB, id);
+  if (!req || req.status !== 'pending') {
+    return c.json({ error: 'not_pending', message: 'That request is no longer open' }, 404);
+  }
+  const body = await c.req.json().catch(() => ({}));
+  const approve = body.decision === 'approve';
+  const note = str(body.note, 300);
+  const me: User = c.get('user');
+  const who = req.name || req.email || req.sub;
+
+  if (approve) {
+    const target = await getUser(c.env.DB, req.sub);
+    if (!target) return c.json({ error: 'user_gone', message: 'That account no longer exists' }, 404);
+    const role = req.ask_role ? roleValue(req.ask_role) : null;
+    await updateUser(c.env.DB, req.sub, {
+      role: role || undefined,
+      dept: req.ask_dept || undefined,
+    });
+  }
+  await decideAccessRequest(c.env.DB, id, approve ? 'approved' : 'denied', me.sub, note);
+  await logEvent(c.env.DB, { sub: me.sub, name: me.name }, 'access', req.sub,
+    approve ? 'approved' : 'denied',
+    `${who}: request ${approve ? 'approved' : 'denied'}${req.ask_role ? ' · role ' + req.ask_role : ''}${req.ask_dept ? ' · ' + req.ask_dept : ''}${note ? ' — ' + note : ''}`);
   return c.json({ ok: true, snapshot: await snapshot(c) });
 });
 
