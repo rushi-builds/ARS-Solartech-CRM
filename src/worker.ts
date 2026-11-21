@@ -482,7 +482,7 @@ async function notifyUser(c: any, target: User, title: string, body: string, ord
 
 // ---------------------------------------------------------------- live sync
 /**
- * Change token for the live-sync poll: seven tiny metadata reads (counts plus
+ * Change token for the live-sync poll: eight tiny metadata reads (counts plus
  * the newest updated_at per table) and nothing else. It costs a fraction of a
  * full snapshot, so the browser can afford to poll it while idle. Anything a
  * per-row read would notice — a stage turning overdue at midnight — is handled
@@ -496,7 +496,7 @@ async function revisionToken(db: D1Database): Promise<string> {
       return null;
     }
   };
-  const [settings, orders, stages, dispatches, users, people, requests, events] = await Promise.all([
+  const [settings, orders, stages, dispatches, users, people, requests, notifications, events] = await Promise.all([
     q('SELECT updated_at FROM settings WHERE id = 1'),
     q('SELECT COUNT(*) AS n, MAX(updated_at) AS at FROM orders'),
     q('SELECT COUNT(*) AS n, MAX(updated_at) AS at FROM order_stages'),
@@ -504,6 +504,9 @@ async function revisionToken(db: D1Database): Promise<string> {
     q('SELECT COUNT(*) AS n, MAX(updated_at) AS at FROM users'),
     q('SELECT COUNT(*) AS n, MAX(created_at) AS at FROM dept_people'),
     q("SELECT COUNT(*) AS n, MAX(COALESCE(decided_at, created_at)) AS at FROM access_requests"),
+    // Alerts land in the bell (task assigned, escalation sent, test alert) and
+    // no event row is written for some of them, so the outbox is its own line.
+    q('SELECT COUNT(*) AS n, MAX(at) AS at FROM notifications'),
     q('SELECT COUNT(*) AS n, MAX(id) AS at FROM events'),
   ]);
   return [
@@ -514,6 +517,7 @@ async function revisionToken(db: D1Database): Promise<string> {
     users?.n ?? 0, users?.at || '',
     people?.n ?? 0, people?.at || '',
     requests?.n ?? 0, requests?.at || '',
+    notifications?.n ?? 0, notifications?.at || '',
     events?.n ?? 0, events?.at || '',
   ].join('|');
 }
