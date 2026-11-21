@@ -22,7 +22,8 @@ const DDL: string[] = [
   )`,
   `CREATE TABLE IF NOT EXISTS customers (
     id TEXT PRIMARY KEY, name TEXT NOT NULL, contact TEXT, phone TEXT,
-    email TEXT, gstin TEXT, address TEXT, created_at TEXT NOT NULL
+    email TEXT, gstin TEXT, address TEXT, created_at TEXT NOT NULL,
+    updated_at TEXT, city TEXT, state TEXT, pincode TEXT, notes TEXT, active INTEGER NOT NULL DEFAULT 1
   )`,
   `CREATE TABLE IF NOT EXISTS orders (
     id TEXT PRIMARY KEY, customer TEXT, project TEXT, structure_type TEXT,
@@ -106,6 +107,33 @@ const ALTERS: string[] = [
   `CREATE INDEX IF NOT EXISTS idx_stage_order_stage ON order_stages(order_id, stage)`,
   `CREATE INDEX IF NOT EXISTS idx_orders_created ON orders(created_at DESC)`,
   `CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customer)`,
+
+  // A note is a comment on an order: the running conversation that used to live
+  // in WhatsApp. Kept separate from the audit trail, which records *changes*,
+  // not what people said to each other about them.
+  `CREATE TABLE IF NOT EXISTS order_notes (
+    id TEXT PRIMARY KEY, order_id TEXT NOT NULL, body TEXT NOT NULL,
+    author_sub TEXT, author_name TEXT, kind TEXT NOT NULL DEFAULT 'note',
+    pinned INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, edited_at TEXT
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_notes_order ON order_notes(order_id, created_at DESC)`,
+
+  // Free-form labels on an order (urgent, rework, hold...) plus the customer
+  // master lookup. Both are additive: an order with no tags behaves exactly as
+  // it did before.
+  `CREATE TABLE IF NOT EXISTS order_tags (
+    order_id TEXT NOT NULL, tag TEXT NOT NULL, added_by TEXT, added_at TEXT NOT NULL,
+    PRIMARY KEY (order_id, tag)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_tags_tag ON order_tags(tag)`,
+
+  `ALTER TABLE customers ADD COLUMN updated_at TEXT`,
+  `ALTER TABLE customers ADD COLUMN city TEXT`,
+  `ALTER TABLE customers ADD COLUMN state TEXT`,
+  `ALTER TABLE customers ADD COLUMN pincode TEXT`,
+  `ALTER TABLE customers ADD COLUMN notes TEXT`,
+  `ALTER TABLE customers ADD COLUMN active INTEGER NOT NULL DEFAULT 1`,
+  `CREATE INDEX IF NOT EXISTS idx_customers_name ON customers(name COLLATE NOCASE)`,
 ];
 
 let ready: Promise<void> | null = null;

@@ -265,6 +265,9 @@ const ICONS = {
   search: '<circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/>',
   filter: '<path d="M3 5h18"/><path d="M6.5 12h11"/><path d="M10 19h4"/>',
   download: '<path d="M12 3v12"/><path d="M7.5 10.5L12 15l4.5-4.5"/><path d="M4 20h16"/>',
+  building: '<rect x="4" y="3" width="16" height="18" rx="2"/><path d="M9 7h2M13 7h2M9 11h2M13 11h2M9 15h2M13 15h2"/><path d="M10 21v-3h4v3"/>',
+  tag: '<path d="M3 12V5a2 2 0 0 1 2-2h7l9 9-9 9z"/><circle cx="8" cy="8" r="1.4"/>',
+  note: '<path d="M20 4H8L4 8v12h16z"/><path d="M8 4v4H4"/><path d="M9 13h7M9 17h5"/>',
 };
 const icon = (name) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${ICONS[name] || ''}</svg>`;
 
@@ -275,6 +278,10 @@ const S = {
   // the devices screen likewise: neither belongs in the 20s snapshot.
   activity: { rows: null, entities: [], entity: 'all', q: '', loading: false },
   sessions: { rows: null, scope: 'own', loading: false },
+  customers: { rows: null, missing: [], q: '', loading: false },
+  notes: { orderId: null, rows: null, loading: false },
+  // Bulk selection on the orders table.
+  picked: new Set(),
 };
 
 const FULL_ROLES = ['owner', 'admin', 'manager'];
@@ -288,6 +295,7 @@ const VIEWS = {
   settings: { title: 'Settings', sub: 'Advanced backend settings — planning, access control, alerts and teams', icon: 'gear' },
   activity: { title: 'Activity', sub: 'Every change, who made it and when', icon: 'clock' },
   sessions: { title: 'Sessions & devices', sub: 'Where this workspace is signed in, and how to sign it out', icon: 'shield' },
+  customers: { title: 'Customers', sub: 'The customer master behind every order', icon: 'building' },
 };
 
 /* ── API ───────────────────────────────────────────────────── */
@@ -477,6 +485,7 @@ function render() {
     settings: viewSettings,
     activity: viewActivity,
     sessions: viewSessions,
+    customers: viewCustomers,
   })[S.view]();
   const viewEl = $('#view');
   viewEl.innerHTML = html;
@@ -605,7 +614,7 @@ function reqAsk(r) {
 
 function renderNav() {
   const items = [
-    { id: 'dashboard' }, { id: 'orders' }, { id: 'dispatch' }, { id: 'capacity' },
+    { id: 'dashboard' }, { id: 'orders' }, { id: 'dispatch' }, { id: 'customers' }, { id: 'capacity' },
     { sep: 'Administration' },
     { id: 'users', hide: !cap('users') && !cap('settings') },
     { id: 'settings', hide: !cap('settings') && !cap('users') },
@@ -840,6 +849,21 @@ function viewOrders() {
         .map((s) => opt(String(s.no), s.no + ' · ' + s.name, S.stage)).join('')}
     </select>
     <span class="pill">${rows.length} shown</span>
+    ${S.picked.size ? `<div class="bulk-bar">
+      <b>${S.picked.size}</b> selected
+      <select id="bulkAction">
+        <option value="">Bulk action…</option>
+        <option value="status:open">Reopen</option>
+        <option value="status:closed">Mark closed</option>
+        <option value="status:cancelled">Mark cancelled</option>
+        <option value="priority:Urgent">Priority → Urgent</option>
+        <option value="priority:High">Priority → High</option>
+        <option value="tag:urgent">Tag → urgent</option>
+        <option value="tag:hold">Tag → hold</option>
+        ${cap('delete') ? '<option value="delete">Delete selected</option>' : ''}
+      </select>
+      <button class="btn ghost small" data-act="bulk-clear">Clear</button>
+    </div>` : ''}
     <span style="flex:1"></span>
     <button class="btn ghost small" data-act="import">Import</button>
     <button class="btn ghost small" data-act="export">Export</button>
@@ -863,11 +887,12 @@ function viewOrders() {
     <div class="table-wrap">
       <table>
         <thead><tr>
+          <th class="pick"><input type="checkbox" id="pickAll" ${rows.length && rows.every((o) => S.picked.has(o.id)) ? 'checked' : ''} title="Select all shown" /></th>
           <th>Order</th><th>Customer / project</th><th class="num">MT</th><th>Confirmed</th><th>Due</th>
           <th>With whom</th><th>Forecast dispatch</th><th class="num">Buffer</th><th>Progress</th><th>Status</th>
         </tr></thead>
         <tbody>
-          ${rows.length ? rows.map(orderRow).join('') : `<tr><td colspan="10" class="empty">No orders match this filter.</td></tr>`}
+          ${rows.length ? rows.map(orderRow).join('') : `<tr><td colspan="11" class="empty">No orders match this filter.</td></tr>`}
         </tbody>
       </table>
     </div>
@@ -897,8 +922,11 @@ function stageDots(o) {
 
 function orderRow(o) {
   const pct = clampPct(o.live.progress);
-  return `<tr class="clickable" data-act="open-order" data-id="${esc(o.id)}">
-    <td><div class="cell-id"><span class="mono">${esc(o.id)}</span>${stageDots(o)}</div>${o.live.sopFlag ? '<small class="sub-line" style="color:#ffb47a">SOP flag</small>' : ''}</td>
+  return `<tr class="clickable ${S.picked.has(o.id) ? 'picked' : ''}" data-act="open-order" data-id="${esc(o.id)}">
+    <td class="pick"><input type="checkbox" data-pick="${esc(o.id)}" ${S.picked.has(o.id) ? 'checked' : ''} /></td>
+    <td><div class="cell-id"><span class="mono">${esc(o.id)}</span>${stageDots(o)}</div>
+      ${(o.tags || []).map((t) => `<span class="tag">${esc(t)}</span>`).join('')}
+      ${o.live.sopFlag ? '<small class="sub-line" style="color:#ffb47a">SOP flag</small>' : ''}</td>
     <td><span class="cust">${esc(o.customer || '—')}</span><small class="sub-line">${esc(o.project || '')}</small></td>
     <td class="num">${n1(o.mt)}<small class="sub-line" style="text-align:right">MT</small></td>
     <td>${fmt(o.conf_date)}</td>
@@ -936,6 +964,21 @@ function openDrawer(id, silent) {
       ${ragBadge(o.live.rag)}
       <span class="badge grey">${esc(o.live.stage)}</span>
       ${o.live.sopFlag ? `<span class="badge amber">${esc(o.live.sopFlag)}</span>` : ''}
+      ${(o.tags || []).map((t) => `<span class="tag" data-act="untag-order" data-id="${esc(o.id)}" data-tag="${esc(t)}" title="Remove tag">${esc(t)}</span>`).join('')}
+      <button class="btn ghost small" data-act="tag-order" data-id="${esc(o.id)}">${icon('tag')}<span>Tag</span></button>
+    </div>
+
+    <div class="card tight" style="margin-bottom:14px">
+      <div class="card-head" style="margin-bottom:10px">
+        <div class="lead"><span class="head-ico grey">${icon('note')}</span>
+          <div><p class="h-eyebrow">Conversation</p><h3>Notes &amp; updates</h3></div></div>
+        <span class="hint" data-notes-count="${esc(o.id)}">${S.notes.orderId === o.id && S.notes.rows ? S.notes.rows.length : ''}</span>
+      </div>
+      <div class="note-compose">
+        <textarea data-note-input="${esc(o.id)}" rows="2" placeholder="Add a note for the team — a phone call, a delay reason, a decision…"></textarea>
+        <button class="btn primary small" data-act="add-note" data-id="${esc(o.id)}">Post</button>
+      </div>
+      <div data-notes="${esc(o.id)}">${notesHtml(o.id)}</div>
     </div>
 
     ${o.live.rag === 'CLOSED'
@@ -1015,6 +1058,45 @@ function openDrawer(id, silent) {
   requestAnimationFrame(() => host.classList.add('open'));
   $$('[data-drawer-close]', host).forEach((el) => el.addEventListener('click', closeDrawer));
   if (!silent) return;
+}
+
+function notesHtml(orderId) {
+  if (S.notes.orderId !== orderId) {
+    if (!S.notes.loading) loadNotes(orderId);
+    return '<div class="empty" style="padding:14px">Loading notes…</div>';
+  }
+  const rows = S.notes.rows || [];
+  if (!rows.length) return '<div class="empty" style="padding:14px">Nothing said yet. The first note starts the thread.</div>';
+  return `<div class="note-list">${rows.map((n) => `
+    <div class="note-row">
+      <span class="team-ava small">${esc(initials(n.author_name, ''))}</span>
+      <div class="note-body">
+        <span class="note-meta"><b>${esc(n.author_name || 'Someone')}</b> · ${esc(String(n.created_at).slice(0, 16).replace('T', ' '))}
+          ${n.kind === 'update' ? '<span class="tl-badge">update</span>' : ''}</span>
+        <p>${esc(n.body)}</p>
+      </div>
+      ${cap('delete') ? `<button class="icon-btn" data-act="del-note" data-id="${esc(n.order_id)}" data-note="${esc(n.id)}" title="Delete note">×</button>` : ''}
+    </div>`).join('')}</div>`;
+}
+
+async function loadNotes(orderId) {
+  if (S.notes.loading) return;
+  S.notes.loading = true;
+  try {
+    const res = await api('/api/orders/' + encodeURIComponent(orderId) + '/notes');
+    S.notes.orderId = orderId;
+    S.notes.rows = res.notes || [];
+  } catch (e) {
+    S.notes.orderId = orderId;
+    S.notes.rows = [];
+  } finally {
+    S.notes.loading = false;
+  }
+  // redraw only the note block so the date pickers and scroll position survive
+  const host = document.querySelector(`[data-notes="${orderId}"]`);
+  if (host) host.innerHTML = notesHtml(orderId);
+  const count = document.querySelector(`[data-notes-count="${orderId}"]`);
+  if (count) count.textContent = S.notes.rows ? S.notes.rows.length || '' : '';
 }
 
 function stageRowHtml(o, m, plan) {
@@ -1427,6 +1509,90 @@ function viewSessions() {
       <p class="sub-line" style="margin:0">
         If you see a device you do not recognise, sign it out and change your password — changing it signs out every other device automatically.
       </p>
+    </div>
+  </div>`;
+}
+
+
+/* ── customers ─────────────────────────────────────────────── */
+async function loadCustomers() {
+  if (S.customers.loading) return;
+  S.customers.loading = true;
+  try {
+    const res = await api('/api/customers');
+    S.customers.rows = res.customers || [];
+    S.customers.missing = res.missing || [];
+  } catch (e) {
+    S.customers.rows = [];
+    toast(e.message || 'Could not load customers', 'err');
+  } finally {
+    S.customers.loading = false;
+  }
+  if (S.view === 'customers') render();
+}
+
+function viewCustomers() {
+  const C = S.customers;
+  if (!C.rows && !C.loading) {
+    loadCustomers();
+    return `<div class="empty">Loading customers…</div>`;
+  }
+  const q = C.q.trim().toLowerCase();
+  const rows = (C.rows || []).filter((c) => {
+    if (!q) return true;
+    return [c.name, c.contact, c.city, c.email, c.phone, c.gstin].filter(Boolean).join(' ').toLowerCase().includes(q);
+  });
+  const totalMt = rows.reduce((s, c) => s + (Number(c.total_mt) || 0), 0);
+  const active = (C.rows || []).filter((c) => c.active).length;
+
+  return `
+  <div class="grid cols-4">
+    ${kpiTile('Customers', (C.rows || []).length, `${active} active`, 'accent')}
+    ${kpiTile('Order book', n1(totalMt) + ' MT', 'across the customers shown', 'blue')}
+    ${kpiTile('Repeat', (C.rows || []).filter((c) => c.orders > 1).length, 'with more than one order', 'green')}
+    ${kpiTile('Not in master', (C.missing || []).length, 'names found in the order book', (C.missing || []).length ? 'amber' : 'green')}
+  </div>
+
+  ${(C.missing || []).length ? `<div class="note" style="margin-top:14px">
+    <strong>${C.missing.length} customer name${C.missing.length === 1 ? '' : 's'} from the order book are not in the master yet.</strong>
+    They are already on orders — adding them here just lets you keep contacts, GSTIN and history in one place.
+    <div style="flex:1"></div>
+    <button class="btn primary small" data-act="customers-backfill">Add all ${C.missing.length} in one click</button>
+  </div>` : ''}
+
+  <div class="card flush" style="margin-top:14px">
+    <div class="card-head">
+      <div class="lead">
+        <span class="head-ico grey">${icon('building')}</span>
+        <div><p class="h-eyebrow">Customer master</p><h3>${rows.length} customer${rows.length === 1 ? '' : 's'}</h3></div>
+      </div>
+      <div class="inline">
+        <label class="search-wrap">${icon('search')}
+          <input class="search" id="custQ" placeholder="Search name, city, GSTIN…" value="${esc(C.q)}" />
+        </label>
+        ${cap('order') ? '<button class="btn primary small" data-act="new-customer">+ New customer</button>' : ''}
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Customer</th><th>Contact</th><th>Location</th><th>GSTIN</th>
+          <th class="num">Orders</th><th class="num">MT</th><th>Last order</th><th></th></tr></thead>
+        <tbody>
+          ${rows.length ? rows.map((c) => `<tr class="${c.active ? '' : 'muted'}">
+            <td><span class="cust">${esc(c.name)}</span>${c.active ? '' : '<small class="sub-line">inactive</small>'}</td>
+            <td>${esc(c.contact || '—')}${c.phone ? `<small class="sub-line">${esc(c.phone)}</small>` : ''}</td>
+            <td>${esc([c.city, c.state].filter(Boolean).join(', ') || '—')}</td>
+            <td class="mono" style="font-size:11.5px">${esc(c.gstin || '—')}</td>
+            <td class="num">${c.orders || 0}${c.open_orders ? `<small class="sub-line">${c.open_orders} open</small>` : ''}</td>
+            <td class="num">${n1(c.total_mt)}</td>
+            <td>${c.last_order_at ? fmt(String(c.last_order_at).slice(0, 10)) : '—'}</td>
+            <td class="num inline" style="justify-content:flex-end">
+              ${cap('order') ? `<button class="btn ghost small" data-act="edit-customer" data-id="${esc(c.id)}">Edit</button>` : ''}
+              ${cap('delete') ? `<button class="icon-btn" data-act="del-customer" data-id="${esc(c.id)}" data-name="${esc(c.name)}" title="Delete">×</button>` : ''}
+            </td>
+          </tr>`).join('') : `<tr><td colspan="8" class="empty">${C.rows && C.rows.length ? 'Nothing matches that search.' : 'No customers yet. Add one, or import the names already on your orders.'}</td></tr>`}
+        </tbody>
+      </table>
     </div>
   </div>`;
 }
@@ -2140,6 +2306,79 @@ function resetPasswordModal(sub, name) {
   });
 }
 
+
+function customerModal(existing) {
+  const c = existing || {};
+  const body = `
+    <div class="form-grid">
+      ${field('Customer name *', 'name', c.name || '', 'text', 'required maxlength="160"')}
+      ${field('Contact person', 'contact', c.contact || '')}
+      ${field('Phone', 'phone', c.phone || '', 'tel')}
+      ${field('Email', 'email', c.email || '', 'email')}
+      ${field('GSTIN', 'gstin', c.gstin || '', 'text', 'maxlength="20"')}
+      ${field('City', 'city', c.city || '')}
+      ${field('State', 'state', c.state || '')}
+      ${field('PIN', 'pincode', c.pincode || '', 'text', 'maxlength="10"')}
+    </div>
+    <label class="field"><span>Address</span>
+      <textarea name="address" rows="2">${esc(c.address || '')}</textarea></label>
+    <label class="field"><span>Notes</span>
+      <textarea name="notes" rows="2" placeholder="Payment terms, relationship history, anything the team should know">${esc(c.notes || '')}</textarea></label>
+    ${existing ? `<label class="inline" style="margin-top:4px">
+      <input type="checkbox" name="active" ${c.active ? 'checked' : ''} /> <span class="sub-line" style="margin:0">Active (unticked keeps the record but hides it from new orders)</span>
+    </label>` : ''}`;
+  modal({
+    title: existing ? `Edit ${c.name}` : 'New customer',
+    sub: existing ? 'Contact details, billing address and notes.' : 'The master record every order can draw its details from.',
+    body,
+    submit: existing ? 'Save customer' : 'Add customer',
+    async onSubmit(data) {
+      const payload = { ...data, active: existing ? (data.active ? 1 : 0) : 1 };
+      const res = existing
+        ? await api('/api/customers/' + encodeURIComponent(c.id), 'PATCH', payload)
+        : await api('/api/customers', 'POST', payload);
+      S.customers.rows = res.customers;
+      if (res.missing) S.customers.missing = res.missing;
+      closeModal();
+      render();
+      toast(existing ? 'Customer updated' : 'Customer added', 'ok');
+    },
+  });
+}
+
+function tagModal(orderId) {
+  const o = S.d.orders.find((x) => x.id === orderId);
+  if (!o) return;
+  const current = (o.tags || []).join(', ');
+  const known = (S.d.tags || []).map((t) => t.tag);
+  const body = `
+    ${field('Tags (comma separated)', 'tags', current, 'text', 'maxlength="160" placeholder="urgent, rework, hold"')}
+    <p class="sub-line">Up to 8 tags, 24 characters each. Tags are filterable and appear on the order row.</p>
+    ${known.length ? `<div class="inline" style="margin-top:10px">${known.map((t) => `<button type="button" class="tag" data-tag-pick="${esc(t)}">${esc(t)}</button>`).join('')}</div>` : ''}`;
+  modal({
+    title: `Tags — ${o.customer || o.id}`,
+    sub: 'A fast way to group orders that need the same attention.',
+    body,
+    submit: 'Save tags',
+    async onSubmit(data) {
+      const tags = String(data.tags || '').split(',').map((t) => t.trim()).filter(Boolean);
+      const res = await api('/api/orders/' + encodeURIComponent(o.id) + '/tags', 'PUT', { tags });
+      apply(res);
+      closeModal();
+      render();
+      toast('Tags saved', 'ok');
+    },
+  });
+  $$('[data-tag-pick]', $('#modal')).forEach((b) => {
+    b.addEventListener('click', () => {
+      const input = $('[name=tags]', $('#modal'));
+      const list = input.value.split(',').map((t) => t.trim()).filter(Boolean);
+      if (!list.includes(b.dataset.tagPick)) list.push(b.dataset.tagPick);
+      input.value = list.join(', ');
+    });
+  });
+}
+
 function importModal() {
   const body = `
     <div class="inline" style="margin-bottom:12px">
@@ -2346,6 +2585,72 @@ function exportDispatches() {
    actions
    ══════════════════════════════════════════════════════════════ */
 const ACTIONS = {
+  'new-customer': () => customerModal(null),
+  'edit-customer': (el) => {
+    const c = (S.customers.rows || []).find((x) => x.id === el.dataset.id);
+    if (c) customerModal(c);
+  },
+  'del-customer': async (el) => {
+    if (!confirm(`Delete ${el.dataset.name} from the customer master? Orders stay as they are.`)) return;
+    try {
+      const res = await api('/api/customers/' + encodeURIComponent(el.dataset.id), 'DELETE');
+      S.customers.rows = res.customers;
+      S.customers.missing = res.missing;
+      render();
+      toast('Customer deleted', 'ok');
+    } catch (e) { toast(e.message, 'err'); }
+  },
+  'customers-backfill': async () => {
+    try {
+      const res = await api('/api/customers/backfill', 'POST', {});
+      S.customers.rows = res.customers;
+      S.customers.missing = res.missing;
+      render();
+      toast(`${res.added} customer(s) added from the order book`, 'ok');
+    } catch (e) { toast(e.message, 'err'); }
+  },
+  'add-note': async (el) => {
+    const id = el.dataset.id;
+    const box = document.querySelector(`[data-note-input="${id}"]`);
+    const body = box ? box.value.trim() : '';
+    if (!body) { if (box) box.focus(); return; }
+    el.disabled = true;
+    try {
+      const res = await api('/api/orders/' + encodeURIComponent(id) + '/notes', 'POST', { body });
+      S.notes.orderId = id;
+      S.notes.rows = res.notes || [];
+      if (box) box.value = '';
+      const host = document.querySelector(`[data-notes="${id}"]`);
+      if (host) host.innerHTML = notesHtml(id);
+      const count = document.querySelector(`[data-notes-count="${id}"]`);
+      if (count) count.textContent = S.notes.rows.length || '';
+      toast('Note posted', 'ok');
+    } catch (e) { toast(e.message, 'err'); }
+    el.disabled = false;
+  },
+  'del-note': async (el) => {
+    if (!confirm('Delete this note?')) return;
+    const id = el.dataset.id;
+    try {
+      const res = await api(`/api/orders/${encodeURIComponent(id)}/notes/${encodeURIComponent(el.dataset.note)}`, 'DELETE');
+      S.notes.orderId = id;
+      S.notes.rows = res.notes || [];
+      const host = document.querySelector(`[data-notes="${id}"]`);
+      if (host) host.innerHTML = notesHtml(id);
+    } catch (e) { toast(e.message, 'err'); }
+  },
+  'tag-order': (el) => tagModal(el.dataset.id),
+  'untag-order': async (el) => {
+    const o = S.d.orders.find((x) => x.id === el.dataset.id);
+    if (!o) return;
+    const tags = (o.tags || []).filter((t) => t !== el.dataset.tag);
+    try {
+      const res = await api('/api/orders/' + encodeURIComponent(o.id) + '/tags', 'PUT', { tags });
+      apply(res);
+      render();
+    } catch (e) { toast(e.message, 'err'); }
+  },
+  'bulk-clear': () => { S.picked.clear(); render(); },
   'audit-more': () => loadActivity(true),
   'sessions-refresh': () => loadSessions(),
   'revoke-session': async (el) => {
@@ -2677,6 +2982,16 @@ document.addEventListener('input', (ev) => {
 
 // Audit search is debounced: it hits the server, so typing must not fire a
 // request per keystroke.
+document.addEventListener('input', (ev) => {
+  if (ev.target.id === 'custQ') {
+    S.customers.q = ev.target.value;
+    const pos = ev.target.selectionStart;
+    render();
+    const q = $('#custQ');
+    if (q) { q.focus(); q.setSelectionRange(pos, pos); }
+  }
+});
+
 let auditTimer = 0;
 document.addEventListener('input', (ev) => {
   if (ev.target.id !== 'auditQ') return;
@@ -2684,16 +2999,54 @@ document.addEventListener('input', (ev) => {
   clearTimeout(auditTimer);
   auditTimer = setTimeout(() => { loadActivity(); }, 280);
 });
-document.addEventListener('change', (ev) => {
+document.addEventListener('change', async (ev) => {
   if (ev.target.id === 'auditEntity') {
     S.activity.entity = ev.target.value;
     loadActivity();
+    return;
+  }
+  if (ev.target.id === 'pickAll') {
+    const rows = filteredOrders();
+    if (ev.target.checked) rows.forEach((o) => S.picked.add(o.id));
+    else S.picked.clear();
+    render();
+    return;
+  }
+  if (ev.target.dataset && ev.target.dataset.pick) {
+    const id = ev.target.dataset.pick;
+    if (ev.target.checked) S.picked.add(id);
+    else S.picked.delete(id);
+    render();
+    return;
+  }
+  if (ev.target.id === 'bulkAction' && ev.target.value) {
+    const [action, ...rest] = ev.target.value.split(':');
+    const value = rest.join(':');
+    const ids = [...S.picked];
+    if (!ids.length) return;
+    const label = action === 'delete'
+      ? `Delete ${ids.length} order(s) and everything on them?`
+      : `Apply "${action}${value ? ' → ' + value : ''}" to ${ids.length} order(s)?`;
+    if (!confirm(label)) { ev.target.value = ''; return; }
+    ev.target.disabled = true;
+    try {
+      const res = await api('/api/orders/bulk', 'POST', { ids, action, value });
+      S.picked.clear();
+      apply(res);
+      render();
+      toast(`${res.changed} order(s) updated`, 'ok');
+    } catch (e) {
+      toast(e.message, 'err');
+      ev.target.disabled = false;
+    }
   }
 });
 
 // The status chip is not a reload button — but tapping it forces a sync, which
 // is what anyone instinctively tries. It just never looks like a control.
 document.addEventListener('click', (ev) => {
+  // A checkbox in a clickable row is a selection, not a navigation.
+  if (ev.target.closest && ev.target.closest('.pick, .tag')) { ev.stopPropagation(); return; }
   if (!ev.target.closest || !ev.target.closest('[data-act="sync-check"]')) return;
   if (Date.now() < SYNC.busyUntil) return;
   syncPull();

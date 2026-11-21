@@ -729,8 +729,204 @@ export async function deleteOrder(db: D1Database, id: string) {
     db.prepare('DELETE FROM order_stages WHERE order_id = ?').bind(id),
     db.prepare('DELETE FROM dispatches WHERE order_id = ?').bind(id),
     db.prepare('DELETE FROM notifications WHERE order_id = ?').bind(id),
+    db.prepare('DELETE FROM order_notes WHERE order_id = ?').bind(id),
+    db.prepare('DELETE FROM order_tags WHERE order_id = ?').bind(id),
     db.prepare('DELETE FROM orders WHERE id = ?').bind(id),
   ]);
+}
+
+
+// ---------------- customers ----------------
+export type CustomerRow = {
+  id: string;
+  name: string;
+  contact: string | null;
+  phone: string | null;
+  email: string | null;
+  gstin: string | null;
+  address: string | null;
+  city: string | null;
+  state: string | null;
+  pincode: string | null;
+  notes: string | null;
+  active: number;
+  created_at: string;
+  updated_at: string | null;
+};
+
+export type CustomerWithStats = CustomerRow & {
+  orders: number;
+  open_orders: number;
+  total_mt: number;
+  last_order_at: string | null;
+};
+
+/**
+ * The customer master, joined against the order book so the list can show what
+ * each relationship is actually worth. Orders store the customer *name* (that
+ * is how the app was built and how imports arrive), so the join is on name and
+ * is defensive about case/whitespace.
+ */
+export async function listCustomers(db: D1Database): Promise<CustomerWithStats[]> {
+  const { results } = await db
+    .prepare(
+      `SELECT c.*,
+              COUNT(o.id) AS orders,
+              SUM(CASE WHEN o.status = 'open' THEN 1 ELSE 0 END) AS open_orders,
+              COALESCE(SUM(o.mt), 0) AS total_mt,
+              MAX(o.created_at) AS last_order_at
+         FROM customers c
+         LEFT JOIN orders o ON TRIM(LOWER(o.customer)) = TRIM(LOWER(c.name))
+        GROUP BY c.id
+        ORDER BY c.active DESC, c.name COLLATE NOCASE`,
+    )
+    .all<CustomerWithStats>();
+  return results || [];
+}
+
+export async function getCustomer(db: D1Database, id: string): Promise<CustomerRow | null> {
+  return (await db.prepare('SELECT * FROM customers WHERE id = ?').bind(id).first<CustomerRow>()) || null;
+}
+
+export async function saveCustomer(
+  db: D1Database,
+  id: string,
+  body: Record<string, any>,
+  isNew: boolean,
+): Promise<void> {
+  // D1 refuses to bind undefined, so a missing field is null, never undefined.
+  const pick = (k: string): string | null => {
+    const v = body[k];
+    if (v === undefined || v === null) return null;
+    const s = String(v).trim();
+    return s ? s.slice(0, 400) : null;
+  };
+  const name = pick('name');
+  const at = nowISO();
+  if (isNew) {
+    await db
+      .prepare(
+        `INSERT INTO customers (id, name, contact, phone, email, gstin, address, city, state, pincode, notes, active, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(
+        id, name || 'Unnamed', pick('contact'), pick('phone'), pick('email'), pick('gstin'),
+        pick('address'), pick('city'), pick('state'), pick('pincode'), pick('notes'),
+        body.active === undefined ? 1 : body.active ? 1 : 0, at, at,
+      )
+      .run();
+    return;
+  }
+  const cols: [string, any][] = [];
+  for (const k of ['name', 'contact', 'phone', 'email', 'gstin', 'address', 'city', 'state', 'pincode', 'notes']) {
+    if (body[k] === undefined) continue;
+    cols.push([k, pick(k)]);
+  }
+  if (body.active !== undefined) cols.push(['active', body.active ? 1 : 0]);
+  if (!cols.length) return;
+  const sets = cols.map(([k]) => `${k} = ?`).join(', ');
+  await db
+    .prepare(`UPDATE customers SET ${sets}, updated_at = ? WHERE id = ?`)
+    .bind(...cols.map(([, v]) => v), at, id)
+    .run();
+}
+
+export async function deleteCustomer(db: D1Database, id: string) {
+  await db.prepare('DELETE FROM customers WHERE id = ?').bind(id).run();
+}
+
+/**
+ * Customers that exist in the order book but not in the master yet. Used to
+ * offer a one-click "add these" on the customers screen, so ten years of orders
+ * do not have to be retyped.
+ */
+export async function missingCustomers(db: D1Database): Promise<{ name: string; orders: number }[]> {
+  const { results } = await db
+    .prepare(
+      `SELECT TRIM(o.customer) AS name, COUNT(*) AS orders
+         FROM orders o
+        WHERE COALESCE(TRIM(o.customer), '') != ''
+          AND NOT EXISTS (SELECT 1 FROM customers c WHERE TRIM(LOWER(c.name)) = TRIM(LOWER(o.customer)))
+        GROUP BY TRIM(LOWER(o.customer))
+        ORDER BY orders DESC, name COLLATE NOCASE`,
+    )
+    .all<{ name: string; orders: number }>();
+  return results || [];
+}
+
+// ---------------- order notes ----------------
+export type OrderNote = {
+  id: string;
+  order_id: string;
+  body: string;
+  author_sub: string | null;
+  author_name: string | null;
+  kind: string;
+  pinned: number;
+  created_at: string;
+  edited_at: string | null;
+};
+
+export async function listOrderNotes(db: D1Database, orderId: string): Promise<OrderNote[]> {
+  const { results } = await db
+    .prepare('SELECT * FROM order_notes WHERE order_id = ? ORDER BY pinned DESC, created_at DESC')
+    .bind(orderId)
+    .all<OrderNote>();
+  return results || [];
+}
+
+export async function addOrderNote(
+  db: D1Database,
+  note: { orderId: string; body: string; kind?: string; authorSub: string; authorName: string; pinned?: boolean },
+) {
+  const id = crypto.randomUUID();
+  await db
+    .prepare(
+      `INSERT INTO order_notes (id, order_id, body, author_sub, author_name, kind, pinned, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .bind(id, note.orderId, note.body, note.authorSub, note.authorName, note.kind || 'note', note.pinned ? 1 : 0, nowISO())
+    .run();
+  return id;
+}
+
+export async function deleteOrderNote(db: D1Database, id: string, orderId: string) {
+  await db.prepare('DELETE FROM order_notes WHERE id = ? AND order_id = ?').bind(id, orderId).run();
+}
+
+// ---------------- order tags ----------------
+export async function listOrderTags(db: D1Database): Promise<Record<string, string[]>> {
+  const { results } = await db
+    .prepare('SELECT order_id, tag FROM order_tags ORDER BY added_at')
+    .all<{ order_id: string; tag: string }>();
+  const out: Record<string, string[]> = {};
+  for (const r of results || []) {
+    (out[r.order_id] = out[r.order_id] || []).push(r.tag);
+  }
+  return out;
+}
+
+/** Replaces an order's tags with exactly this list. */
+export async function setOrderTags(db: D1Database, orderId: string, tags: string[], by: string) {
+  const clean = [...new Set(tags.map((t) => String(t || '').trim().toLowerCase()).filter(Boolean))]
+    .filter((t) => t.length <= 24)
+    .slice(0, 8);
+  await db.batch([
+    db.prepare('DELETE FROM order_tags WHERE order_id = ?').bind(orderId),
+    ...clean.map((t) =>
+      db.prepare('INSERT INTO order_tags (order_id, tag, added_by, added_at) VALUES (?, ?, ?, ?)')
+        .bind(orderId, t, by, nowISO()),
+    ),
+  ]);
+  return clean;
+}
+
+/** Every tag in use, with how many orders carry it — for the filter bar. */
+export async function listAllTags(db: D1Database): Promise<{ tag: string; n: number }[]> {
+  const { results } = await db
+    .prepare('SELECT tag, COUNT(*) AS n FROM order_tags GROUP BY tag ORDER BY n DESC, tag')
+    .all<{ tag: string; n: number }>();
+  return results || [];
 }
 
 // ---------------- dispatches ----------------

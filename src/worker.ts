@@ -71,6 +71,17 @@ import {
   assignStage,
   deleteDeptPerson,
   listDeptPeople,
+  listCustomers,
+  getCustomer,
+  saveCustomer,
+  deleteCustomer,
+  missingCustomers,
+  listOrderNotes,
+  addOrderNote,
+  deleteOrderNote,
+  listOrderTags,
+  setOrderTags,
+  listAllTags,
   listEvents,
   listEventEntities,
   listNotifications,
@@ -399,6 +410,8 @@ function guard(c: any, action: Action) {
   return null;
 }
 
+const nowISO = (): string => new Date().toISOString();
+
 const str = (v: unknown, max = 500): string | null => {
   if (v === null || v === undefined) return null;
   const s = String(v).trim();
@@ -629,7 +642,7 @@ async function revisionToken(db: D1Database): Promise<string> {
       return null;
     }
   };
-  const [settings, orders, stages, dispatches, users, people, requests, notifications, events] = await Promise.all([
+  const [settings, orders, stages, dispatches, users, people, requests, notifications, events, notes, tags] = await Promise.all([
     q('SELECT updated_at FROM settings WHERE id = 1'),
     q('SELECT COUNT(*) AS n, MAX(updated_at) AS at FROM orders'),
     q('SELECT COUNT(*) AS n, MAX(updated_at) AS at FROM order_stages'),
@@ -641,6 +654,8 @@ async function revisionToken(db: D1Database): Promise<string> {
     // no event row is written for some of them, so the outbox is its own line.
     q('SELECT COUNT(*) AS n, MAX(at) AS at FROM notifications'),
     q('SELECT COUNT(*) AS n, MAX(id) AS at FROM events'),
+    q('SELECT COUNT(*) AS n, MAX(created_at) AS at FROM order_notes'),
+    q('SELECT COUNT(*) AS n, MAX(added_at) AS at FROM order_tags'),
   ]);
   return [
     settings?.updated_at || '',
@@ -652,6 +667,10 @@ async function revisionToken(db: D1Database): Promise<string> {
     requests?.n ?? 0, requests?.at || '',
     notifications?.n ?? 0, notifications?.at || '',
     events?.n ?? 0, events?.at || '',
+    // Comments and tags are conversation, not bookkeeping — but they still
+    // change what the screen should show, so they belong in the token.
+    notes?.n ?? 0, notes?.at || '',
+    tags?.n ?? 0, tags?.at || '',
   ].join('|');
 }
 
@@ -671,6 +690,7 @@ async function snapshot(c: any) {
   ]);
   const roster = await deptRoster(db);
   const heads = headsFrom(roster);
+  const tags = await listOrderTags(db);
   const today = todayISO();
   const enriched = enrich(orders, stages, dispatches, settings, heads, today);
   const dash = dashboard(enriched, 16, settings);
@@ -685,7 +705,8 @@ async function snapshot(c: any) {
     me: user,
     capabilities: caps,
     settings,
-    orders: enriched,
+    orders: enriched.map((o) => ({ ...o, tags: tags[o.id] || [] })),
+    tags: await listAllTags(db),
     dispatches,
     stakeholders,
     deptPeople: roster,
@@ -1545,11 +1566,222 @@ app.get('/api/activity', async (c) => {
   });
 });
 
+
+// ---------------------------------------------------------------- customers
+app.get('/api/customers', async (c) => {
+  const denied = guard(c, 'order');
+  if (denied) return denied;
+  return c.json({
+    customers: await listCustomers(c.env.DB),
+    missing: await missingCustomers(c.env.DB),
+  });
+});
+
+app.post('/api/customers', async (c) => {
+  const denied = guard(c, 'order');
+  if (denied) return denied;
+  const body = await jsonBody(c);
+  const name = str(body.name, 160);
+  if (!name) return c.json({ error: 'bad_request', message: 'A customer needs a name' }, 400);
+  const dup = await c.env.DB
+    .prepare('SELECT id FROM customers WHERE TRIM(LOWER(name)) = TRIM(LOWER(?))')
+    .bind(name)
+    .first<{ id: string }>();
+  if (dup) return c.json({ error: 'duplicate', message: `${name} is already in the customer master` }, 409);
+  const id = 'CUS-' + String(Date.now()).slice(-8);
+  const u: User = c.get('user');
+  await saveCustomer(c.env.DB, id, { ...body, name }, true);
+  await logEvent(c.env.DB, { sub: u.sub, name: u.name }, 'customer', id, 'create', `${name} added to the customer master`);
+  return c.json({ ok: true, id, customers: await listCustomers(c.env.DB), missing: await missingCustomers(c.env.DB), snapshot: await snapshot(c) });
+});
+
+app.patch('/api/customers/:id', async (c) => {
+  const denied = guard(c, 'order');
+  if (denied) return denied;
+  const id = c.req.param('id');
+  const existing = await getCustomer(c.env.DB, id);
+  if (!existing) return c.json({ error: 'not_found' }, 404);
+  const body = await jsonBody(c);
+  const u: User = c.get('user');
+  await saveCustomer(c.env.DB, id, body, false);
+  await logEvent(c.env.DB, { sub: u.sub, name: u.name }, 'customer', id, 'update', `${existing.name} updated`);
+  return c.json({ ok: true, customer: await getCustomer(c.env.DB, id), customers: await listCustomers(c.env.DB), snapshot: await snapshot(c) });
+});
+
+app.delete('/api/customers/:id', async (c) => {
+  const denied = guard(c, 'delete');
+  if (denied) return denied;
+  const id = c.req.param('id');
+  const existing = await getCustomer(c.env.DB, id);
+  if (!existing) return c.json({ error: 'not_found' }, 404);
+  // Orders keep their own customer name, so deleting the master entry is safe:
+  // it never deletes the order book with it.
+  const { n } = (await c.env.DB
+    .prepare('SELECT COUNT(*) AS n FROM orders WHERE TRIM(LOWER(customer)) = TRIM(LOWER(?))')
+    .bind(existing.name)
+    .first<{ n: number }>()) || { n: 0 };
+  if (n > 0) {
+    return c.json(
+      { error: 'has_orders', message: `${existing.name} has ${n} order(s). Deactivate the customer instead of deleting.` },
+      409,
+    );
+  }
+  const u: User = c.get('user');
+  await deleteCustomer(c.env.DB, id);
+  await logEvent(c.env.DB, { sub: u.sub, name: u.name }, 'customer', id, 'delete', `${existing.name} removed`);
+  return c.json({ ok: true, customers: await listCustomers(c.env.DB), missing: await missingCustomers(c.env.DB), snapshot: await snapshot(c) });
+});
+
+/** One click: add every customer name that exists in the order book to the master. */
+app.post('/api/customers/backfill', async (c) => {
+  const denied = guard(c, 'order');
+  if (denied) return denied;
+  const u: User = c.get('user');
+  const missing = await missingCustomers(c.env.DB);
+  let added = 0;
+  for (const m of missing.slice(0, 300)) {
+    if (!m.name) continue;
+    const id = 'CUS-' + Math.random().toString(36).slice(2, 10).toUpperCase();
+    try {
+      await saveCustomer(c.env.DB, id, { name: m.name }, true);
+      added++;
+    } catch {
+      /* a name that appeared twice meanwhile: skip it */
+    }
+  }
+  await logEvent(c.env.DB, { sub: u.sub, name: u.name }, 'customer', null, 'backfill', `${added} customers added from the order book`);
+  return c.json({ ok: true, added, customers: await listCustomers(c.env.DB), missing: await missingCustomers(c.env.DB), snapshot: await snapshot(c) });
+});
+
+// ---------------------------------------------------------------- order notes
+app.get('/api/orders/:id/notes', async (c) => {
+  const id = c.req.param('id');
+  return c.json({ notes: await listOrderNotes(c.env.DB, id) });
+});
+
+app.post('/api/orders/:id/notes', async (c) => {
+  const id = c.req.param('id');
+  const order = await c.env.DB.prepare('SELECT id, customer FROM orders WHERE id = ?').bind(id).first<any>();
+  if (!order) return c.json({ error: 'not_found' }, 404);
+  const body = await jsonBody(c);
+  const text = str(body.body, 4000);
+  if (!text) return c.json({ error: 'bad_request', message: 'Write something first' }, 400);
+  const u: User = c.get('user');
+  const noteId = await addOrderNote(c.env.DB, {
+    orderId: id,
+    body: text,
+    kind: body.kind === 'update' ? 'update' : 'note',
+    authorSub: u.sub,
+    authorName: u.name || u.email || 'Someone',
+  });
+  await logEvent(c.env.DB, { sub: u.sub, name: u.name }, 'order', id, 'note', `Note added to ${order.customer || id}`);
+  return c.json({ ok: true, id: noteId, notes: await listOrderNotes(c.env.DB, id), snapshot: await snapshot(c) });
+});
+
+app.delete('/api/orders/:id/notes/:noteId', async (c) => {
+  const id = c.req.param('id');
+  const noteId = c.req.param('noteId');
+  const u: User = c.get('user');
+  const caps = c.get('caps') as Record<string, boolean>;
+  const note = await c.env.DB
+    .prepare('SELECT author_sub FROM order_notes WHERE id = ? AND order_id = ?')
+    .bind(noteId, id)
+    .first<{ author_sub: string | null }>();
+  if (!note) return c.json({ error: 'not_found' }, 404);
+  if (note.author_sub !== u.sub && !caps.delete) {
+    return c.json({ error: 'forbidden', message: 'Only the author or an admin can delete this note' }, 403);
+  }
+  await deleteOrderNote(c.env.DB, noteId, id);
+  return c.json({ ok: true, notes: await listOrderNotes(c.env.DB, id) });
+});
+
+// ---------------------------------------------------------------- order tags
+app.put('/api/orders/:id/tags', async (c) => {
+  const id = c.req.param('id');
+  const order = await c.env.DB.prepare('SELECT id FROM orders WHERE id = ?').bind(id).first();
+  if (!order) return c.json({ error: 'not_found' }, 404);
+  const body = await jsonBody(c);
+  const tags = Array.isArray(body.tags) ? body.tags : [];
+  const u: User = c.get('user');
+  const clean = await setOrderTags(c.env.DB, id, tags, u.sub);
+  return c.json({ ok: true, tags: clean, snapshot: await snapshot(c) });
+});
+
+// ---------------------------------------------------------------- bulk actions
+app.post('/api/orders/bulk', async (c) => {
+  const body = await jsonBody(c);
+  const ids = Array.isArray(body.ids) ? body.ids.map(String).slice(0, 200) : [];
+  const action = String(body.action || '');
+  if (!ids.length) return c.json({ error: 'bad_request', message: 'Pick at least one order' }, 400);
+  const u: User = c.get('user');
+  const caps = c.get('caps') as Record<string, boolean>;
+  const marks = ids.map(() => '?').join(', ');
+  let changed = 0;
+
+  if (action === 'status') {
+    const denied = guard(c, 'order');
+    if (denied) return denied;
+    const status = String(body.value || '');
+    if (!['open', 'closed', 'cancelled'].includes(status)) return c.json({ error: 'bad_value' }, 400);
+    const res = await c.env.DB
+      .prepare(`UPDATE orders SET status = ?, updated_at = ?, updated_by = ? WHERE id IN (${marks})`)
+      .bind(status, nowISO(), u.sub, ...ids)
+      .run();
+    changed = Number((res as any)?.meta?.changes ?? 0);
+  } else if (action === 'priority') {
+    const denied = guard(c, 'order');
+    if (denied) return denied;
+    const priority = str(body.value, 20) || 'Medium';
+    if (!['Low', 'Medium', 'High', 'Urgent'].includes(priority)) return c.json({ error: 'bad_value' }, 400);
+    const res = await c.env.DB
+      .prepare(`UPDATE orders SET priority = ?, updated_at = ?, updated_by = ? WHERE id IN (${marks})`)
+      .bind(priority, nowISO(), u.sub, ...ids)
+      .run();
+    changed = Number((res as any)?.meta?.changes ?? 0);
+  } else if (action === 'tag') {
+    const tag = String(body.value || '').trim().toLowerCase().slice(0, 24);
+    if (!tag) return c.json({ error: 'bad_value' }, 400);
+    for (const id of ids) {
+      await c.env.DB
+        .prepare('INSERT OR IGNORE INTO order_tags (order_id, tag, added_by, added_at) VALUES (?, ?, ?, ?)')
+        .bind(id, tag, u.sub, nowISO())
+        .run();
+      changed++;
+    }
+  } else if (action === 'untag') {
+    const tag = String(body.value || '').trim().toLowerCase();
+    const res = await c.env.DB
+      .prepare(`DELETE FROM order_tags WHERE tag = ? AND order_id IN (${marks})`)
+      .bind(tag, ...ids)
+      .run();
+    changed = Number((res as any)?.meta?.changes ?? 0);
+  } else if (action === 'delete') {
+    if (!caps.delete) return c.json({ error: 'forbidden', message: 'You cannot delete orders' }, 403);
+    for (const id of ids) {
+      await deleteOrder(c.env.DB, id);
+      changed++;
+    }
+  } else {
+    return c.json({ error: 'bad_action' }, 400);
+  }
+
+  await logEvent(c.env.DB, { sub: u.sub, name: u.name }, 'order', null, 'bulk',
+    `${changed} order(s): ${action}${body.value ? ' = ' + String(body.value).slice(0, 30) : ''}`);
+  return c.json({ ok: true, changed, snapshot: await snapshot(c) });
+});
+
 // ---------------------------------------------------------------- static SPA
 // notFound(), not app.all('*'): a catch-all also swallows every route Hono would
 // otherwise resolve, which silently skipped the headers middleware and the
 // "API 404 must be JSON" behaviour for anything that is not an /api route.
 app.notFound((c) => c.env.ASSETS.fetch(c.req.raw));
+// Last-resort handler: an unexpected exception becomes a JSON error with the
+// real reason, instead of an opaque "Internal Server Error" in the browser.
+app.onError((err, c) => {
+  console.error('UNCAUGHT', c.req.method, c.req.path, err && ((err as any).stack || err));
+  const message = String((err as any)?.message || err || 'Unexpected error');
+  return c.json({ error: 'internal', message }, 500);
+});
 
 export default {
   fetch(request: Request, env: Env): Promise<Response> {
