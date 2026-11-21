@@ -134,6 +134,27 @@ const ALTERS: string[] = [
   `ALTER TABLE customers ADD COLUMN notes TEXT`,
   `ALTER TABLE customers ADD COLUMN active INTEGER NOT NULL DEFAULT 1`,
   `CREATE INDEX IF NOT EXISTS idx_customers_name ON customers(name COLLATE NOCASE)`,
+
+  // Attachments. The blob lives in R2 when the bucket is bound, and in the
+  // `data` column when it is not, so the feature works on a plain deployment
+  // and on the free tier without a second service to configure.
+  `CREATE TABLE IF NOT EXISTS attachments (
+    id TEXT PRIMARY KEY, order_id TEXT, customer_id TEXT,
+    filename TEXT NOT NULL, mime TEXT, size INTEGER NOT NULL DEFAULT 0,
+    kind TEXT NOT NULL DEFAULT 'file', storage TEXT NOT NULL DEFAULT 'd1',
+    r2_key TEXT, data TEXT, note TEXT,
+    uploaded_by TEXT, uploaded_name TEXT, created_at TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_attachments_order ON attachments(order_id, created_at DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_attachments_customer ON attachments(customer_id, created_at DESC)`,
+
+  // Saved views live on the server when someone wants them on every device;
+  // the browser-only version stays as the fallback.
+  `CREATE TABLE IF NOT EXISTS saved_views (
+    id TEXT PRIMARY KEY, sub TEXT NOT NULL, name TEXT NOT NULL,
+    scope TEXT NOT NULL DEFAULT 'orders', filters TEXT NOT NULL, created_at TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_saved_views_sub ON saved_views(sub, scope)`,
 ];
 
 let ready: Promise<void> | null = null;

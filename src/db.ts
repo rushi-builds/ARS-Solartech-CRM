@@ -732,6 +732,7 @@ export async function deleteOrder(db: D1Database, id: string) {
     db.prepare('DELETE FROM notifications WHERE order_id = ?').bind(id),
     db.prepare('DELETE FROM order_notes WHERE order_id = ?').bind(id),
     db.prepare('DELETE FROM order_tags WHERE order_id = ?').bind(id),
+    db.prepare('DELETE FROM attachments WHERE order_id = ?').bind(id),
     db.prepare('DELETE FROM orders WHERE id = ?').bind(id),
   ]);
 }
@@ -853,6 +854,121 @@ export async function missingCustomers(db: D1Database): Promise<{ name: string; 
     )
     .all<{ name: string; orders: number }>();
   return results || [];
+}
+
+
+// ---------------- attachments ----------------
+export type Attachment = {
+  id: string;
+  order_id: string | null;
+  customer_id: string | null;
+  filename: string;
+  mime: string | null;
+  size: number;
+  kind: string;
+  storage: string;
+  r2_key: string | null;
+  note: string | null;
+  uploaded_by: string | null;
+  uploaded_name: string | null;
+  created_at: string;
+};
+
+/** Everything except the blob, which is fetched separately on download. */
+export async function listAttachments(
+  db: D1Database,
+  where: { orderId?: string; customerId?: string },
+): Promise<Attachment[]> {
+  const col = where.orderId ? 'order_id' : 'customer_id';
+  const value = where.orderId || where.customerId || '';
+  const { results } = await db
+    .prepare(
+      `SELECT id, order_id, customer_id, filename, mime, size, kind, storage, r2_key, note,
+              uploaded_by, uploaded_name, created_at
+         FROM attachments WHERE ${col} = ? ORDER BY created_at DESC`,
+    )
+    .bind(value)
+    .all<Attachment>();
+  return results || [];
+}
+
+export async function countAttachments(db: D1Database): Promise<Record<string, number>> {
+  const { results } = await db
+    .prepare('SELECT order_id, COUNT(*) AS n FROM attachments WHERE order_id IS NOT NULL GROUP BY order_id')
+    .all<{ order_id: string; n: number }>();
+  const out: Record<string, number> = {};
+  for (const r of results || []) out[r.order_id] = r.n;
+  return out;
+}
+
+export async function saveAttachment(
+  db: D1Database,
+  row: {
+    id: string;
+    orderId: string | null;
+    customerId: string | null;
+    filename: string;
+    mime: string;
+    size: number;
+    kind: string;
+    storage: string;
+    r2Key: string | null;
+    data: string | null;
+    note: string | null;
+    by: string;
+    byName: string;
+  },
+) {
+  await db
+    .prepare(
+      `INSERT INTO attachments (id, order_id, customer_id, filename, mime, size, kind, storage, r2_key, data, note, uploaded_by, uploaded_name, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .bind(
+      row.id, row.orderId, row.customerId, row.filename, row.mime, row.size, row.kind,
+      row.storage, row.r2Key, row.data, row.note, row.by, row.byName, nowISO(),
+    )
+    .run();
+}
+
+export async function getAttachment(db: D1Database, id: string): Promise<(Attachment & { data: string | null }) | null> {
+  return (
+    (await db.prepare('SELECT * FROM attachments WHERE id = ?').bind(id).first<Attachment & { data: string | null }>()) ||
+    null
+  );
+}
+
+export async function deleteAttachment(db: D1Database, id: string) {
+  await db.prepare('DELETE FROM attachments WHERE id = ?').bind(id).run();
+}
+
+// ---------------- saved views (server-side) ----------------
+export type SavedView = {
+  id: string;
+  sub: string;
+  name: string;
+  scope: string;
+  filters: string;
+  created_at: string;
+};
+
+export async function listSavedViews(db: D1Database, sub: string): Promise<SavedView[]> {
+  const { results } = await db
+    .prepare('SELECT * FROM saved_views WHERE sub = ? ORDER BY created_at DESC LIMIT 30')
+    .bind(sub)
+    .all<SavedView>();
+  return results || [];
+}
+
+export async function createSavedView(db: D1Database, v: { id: string; sub: string; name: string; scope: string; filters: string }) {
+  await db
+    .prepare('INSERT INTO saved_views (id, sub, name, scope, filters, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+    .bind(v.id, v.sub, v.name, v.scope, v.filters, nowISO())
+    .run();
+}
+
+export async function deleteSavedView(db: D1Database, id: string, sub: string) {
+  await db.prepare('DELETE FROM saved_views WHERE id = ? AND sub = ?').bind(id, sub).run();
 }
 
 // ---------------- order notes ----------------

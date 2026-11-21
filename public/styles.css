@@ -1294,3 +1294,19 @@ kbd {
   font-size: 12px; line-height: 1; padding: 0;
 }
 .vc-x:hover { background: var(--red, #f87171); color: #fff; }
+
+/* ── attachments ─────────────────────────────────────────────── */
+.file-list { display: flex; flex-direction: column; gap: 7px; }
+.file-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 7px 9px; border-radius: 9px;
+  background: var(--surface-2); border: 1px solid var(--line-2, var(--line));
+}
+.file-kind {
+  flex: 0 0 34px; text-align: center; padding: 3px 0; border-radius: 6px;
+  font-size: 9px; font-weight: 800; letter-spacing: .4px;
+  background: var(--surface); color: var(--text-3); border: 1px solid var(--line-2, var(--line));
+}
+.file-main { flex: 1; min-width: 0; }
+.file-main b { display: block; font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-main small { display: block; font-size: 10.5px; color: var(--text-3); }

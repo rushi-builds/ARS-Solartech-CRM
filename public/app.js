@@ -268,6 +268,7 @@ const ICONS = {
   building: '<rect x="4" y="3" width="16" height="18" rx="2"/><path d="M9 7h2M13 7h2M9 11h2M13 11h2M9 15h2M13 15h2"/><path d="M10 21v-3h4v3"/>',
   tag: '<path d="M3 12V5a2 2 0 0 1 2-2h7l9 9-9 9z"/><circle cx="8" cy="8" r="1.4"/>',
   note: '<path d="M20 4H8L4 8v12h16z"/><path d="M8 4v4H4"/><path d="M9 13h7M9 17h5"/>',
+  file: '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/>',
 };
 const icon = (name) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${ICONS[name] || ''}</svg>`;
 
@@ -283,6 +284,7 @@ const S = {
   // Bulk selection on the orders table.
   picked: new Set(),
   analytics: { data: null, loading: false },
+  files: { orderId: null, rows: null, loading: false, maxBytes: 1048576, storage: 'd1' },
 };
 
 const FULL_ROLES = ['owner', 'admin', 'manager'];
@@ -945,6 +947,82 @@ function orderRow(o) {
   </tr>`;
 }
 
+
+/* ── attachments ─────────────────────────────────────────────── */
+function fmtBytes(n) {
+  const b = Number(n) || 0;
+  if (b < 1024) return b + ' B';
+  if (b < 1048576) return (b / 1024).toFixed(0) + ' KB';
+  return (b / 1048576).toFixed(1) + ' MB';
+}
+
+const FILE_ICON = (name, mime) => {
+  const n = String(name || '').toLowerCase();
+  const m = String(mime || '');
+  if (n.endsWith('.pdf') || m.includes('pdf')) return 'PDF';
+  if (/\.(png|jpe?g|gif|webp|heic)$/.test(n) || m.startsWith('image/')) return 'IMG';
+  if (/\.(xlsx?|csv)$/.test(n)) return 'XLS';
+  if (/\.(docx?)$/.test(n)) return 'DOC';
+  if (/\.(dwg|dxf)$/.test(n)) return 'DWG';
+  return 'FILE';
+};
+
+function attachmentsHtml(orderId) {
+  if (S.files.orderId !== orderId) {
+    if (!S.files.loading) loadAttachments(orderId);
+    return '<div class="empty" style="padding:12px">Loading files…</div>';
+  }
+  const rows = S.files.rows || [];
+  if (!rows.length) return '<div class="empty" style="padding:12px">No files yet. Attach the PO, a drawing or a site photo.</div>';
+  return `<div class="file-list">${rows.map((f) => `
+    <div class="file-row">
+      <span class="file-kind">${esc(FILE_ICON(f.filename, f.mime))}</span>
+      <div class="file-main">
+        <b>${esc(f.filename)}</b>
+        <small>${fmtBytes(f.size)} · ${esc(f.uploaded_name || 'Someone')} · ${esc(String(f.created_at).slice(0, 10))}</small>
+      </div>
+      <a class="btn ghost small" href="/api/attachments/${esc(f.id)}/file" download>Download</a>
+      <button class="icon-btn" data-act="del-file" data-id="${esc(f.id)}" data-order="${esc(orderId)}" title="Remove">×</button>
+    </div>`).join('')}</div>`;
+}
+
+async function loadAttachments(orderId) {
+  if (S.files.loading) return;
+  S.files.loading = true;
+  try {
+    const res = await api('/api/attachments?order=' + encodeURIComponent(orderId));
+    S.files.orderId = orderId;
+    S.files.rows = res.attachments || [];
+    S.files.maxBytes = res.maxBytes;
+    S.files.storage = res.storage;
+  } catch {
+    S.files.orderId = orderId;
+    S.files.rows = [];
+  } finally {
+    S.files.loading = false;
+  }
+  const host = document.querySelector(`[data-files="${orderId}"]`);
+  if (host) host.innerHTML = attachmentsHtml(orderId);
+}
+
+async function uploadFile(orderId, file, kind) {
+  const fd = new FormData();
+  fd.append('file', file);
+  fd.append('order_id', orderId);
+  if (kind) fd.append('kind', kind);
+  // No Content-Type header: the browser must set the multipart boundary.
+  const res = await fetch('/api/attachments', { method: 'POST', body: fd, credentials: 'same-origin' });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.message || 'Upload failed');
+  S.files.orderId = orderId;
+  S.files.rows = body.attachments || [];
+  S.files.loading = false;
+  const host = document.querySelector(`[data-files="${orderId}"]`);
+  if (host) host.innerHTML = attachmentsHtml(orderId);
+  if (body.snapshot) apply(body.snapshot);
+  return body;
+}
+
 /* ── order drawer ──────────────────────────────────────────── */
 function openDrawer(id, silent) {
   const o = S.d.orders.find((x) => x.id === id);
@@ -985,6 +1063,18 @@ function openDrawer(id, silent) {
         <button class="btn primary small" data-act="add-note" data-id="${esc(o.id)}">Post</button>
       </div>
       <div data-notes="${esc(o.id)}">${notesHtml(o.id)}</div>
+    </div>
+
+    <div class="card tight" style="margin-bottom:14px">
+      <div class="card-head" style="margin-bottom:10px">
+        <div class="lead"><span class="head-ico grey">${icon('file')}</span>
+          <div><p class="h-eyebrow">Documents</p><h3>Files</h3></div></div>
+        <label class="btn ghost small" style="cursor:pointer">
+          + Attach
+          <input type="file" data-file-input="${esc(o.id)}" hidden />
+        </label>
+      </div>
+      <div data-files="${esc(o.id)}">${attachmentsHtml(o.id)}</div>
     </div>
 
     ${o.live.rag === 'CLOSED'
@@ -2890,6 +2980,18 @@ function exportDispatches() {
    actions
    ══════════════════════════════════════════════════════════════ */
 const ACTIONS = {
+  'del-file': async (el) => {
+    if (!confirm('Remove this file?')) return;
+    try {
+      const res = await api('/api/attachments/' + encodeURIComponent(el.dataset.id), 'DELETE');
+      S.files.orderId = el.dataset.order;
+      S.files.rows = res.attachments || [];
+      const host = document.querySelector(`[data-files="${el.dataset.order}"]`);
+      if (host) host.innerHTML = attachmentsHtml(el.dataset.order);
+      apply(res.snapshot);
+      toast('File removed', 'ok');
+    } catch (e) { toast(e.message, 'err'); }
+  },
   'palette-open': () => paletteOpen(),
   'palette-close': () => paletteClose(),
   'print': () => window.print(),
@@ -3311,6 +3413,27 @@ document.addEventListener('input', (ev) => {
   auditTimer = setTimeout(() => { loadActivity(); }, 280);
 });
 document.addEventListener('change', async (ev) => {
+  if (ev.target.dataset && ev.target.dataset.fileInput) {
+    const input = ev.target;
+    const orderId = input.dataset.fileInput;
+    const file = input.files && input.files[0];
+    if (!file) return;
+    const limit = S.files.maxBytes || 1048576;
+    if (file.size > limit) {
+      toast(`That file is ${fmtBytes(file.size)} — the limit is ${fmtBytes(limit)}${S.files.storage === 'd1' ? ' without a storage bucket bound' : ''}`, 'err');
+      input.value = '';
+      return;
+    }
+    toast(`Uploading ${file.name}…`, 'ok');
+    try {
+      await uploadFile(orderId, file);
+      toast('File attached', 'ok');
+    } catch (e) {
+      toast(e.message || 'Upload failed', 'err');
+    }
+    input.value = '';
+    return;
+  }
   if (ev.target.id === 'auditEntity') {
     S.activity.entity = ev.target.value;
     loadActivity();

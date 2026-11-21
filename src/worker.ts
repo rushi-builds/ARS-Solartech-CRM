@@ -83,6 +83,14 @@ import {
   setOrderTags,
   listAllTags,
   analytics,
+  listAttachments,
+  countAttachments,
+  saveAttachment,
+  getAttachment,
+  deleteAttachment,
+  listSavedViews,
+  createSavedView,
+  deleteSavedView,
   listEvents,
   listEventEntities,
   listNotifications,
@@ -128,6 +136,8 @@ export interface Env {
   AI_MODEL?: string;
   // Optional: the account that always stays owner (see db.rootAdminEmail).
   ROOT_ADMIN_EMAIL?: string;
+  // Optional: bind a bucket and attachments are stored there instead of D1.
+  FILES?: R2Bucket;
 }
 
 type Ctx = { Bindings: Env; Variables: { user: User; caps: Record<string, boolean> } };
@@ -1579,6 +1589,168 @@ app.get('/api/analytics', async (c) => {
   const roster = await deptRoster(db);
   const enriched = enrich(orders, stages, dispatches, settings, headsFrom(roster), todayISO());
   return c.json({ analytics: analytics(enriched, settings) });
+});
+
+
+// ---------------------------------------------------------------- attachments
+const MAX_FILE = 8 * 1024 * 1024;          // 8 MB per file
+const D1_FILE_LIMIT = 1024 * 1024;         // 1 MB when there is no bucket
+
+function safeName(name: string): string {
+  return String(name || 'file')
+    .replace(/[\u0000-\u001f<>:"/\\|?*]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 120) || 'file';
+}
+
+/** Attachments for one order or one customer, without the blobs. */
+app.get('/api/attachments', async (c) => {
+  const orderId = c.req.query('order');
+  const customerId = c.req.query('customer');
+  if (!orderId && !customerId) return c.json({ error: 'bad_request', message: 'Which order or customer?' }, 400);
+  return c.json({
+    attachments: await listAttachments(c.env.DB, orderId ? { orderId } : { customerId }),
+    storage: c.env.FILES ? 'r2' : 'd1',
+    maxBytes: c.env.FILES ? MAX_FILE : D1_FILE_LIMIT,
+  });
+});
+
+/**
+ * Upload is multipart/form-data, because that is what a file input sends and
+ * because JSON/base64 would inflate every PDF by a third.
+ */
+app.post('/api/attachments', async (c) => {
+  const u: User = c.get('user');
+  const form = await c.req.formData().catch(() => null);
+  if (!form) return c.json({ error: 'bad_request', message: 'Expected a file upload' }, 400);
+
+  const file = form.get('file');
+  if (!file || typeof file === 'string') return c.json({ error: 'bad_request', message: 'No file was sent' }, 400);
+
+  const orderId = String(form.get('order_id') || '') || null;
+  const customerId = String(form.get('customer_id') || '') || null;
+  if (!orderId && !customerId) return c.json({ error: 'bad_request', message: 'Which order or customer?' }, 400);
+
+  const size = (file as File).size || 0;
+  const limit = c.env.FILES ? MAX_FILE : D1_FILE_LIMIT;
+  if (size > limit) {
+    return c.json(
+      {
+        error: 'too_large',
+        message: `Files up to ${Math.round(limit / 1048576)} MB are allowed${c.env.FILES ? '' : ' without a bucket bound'}`,
+      },
+      413,
+    );
+  }
+
+  const filename = safeName((file as File).name);
+  const mime = (file as File).type || 'application/octet-stream';
+  const id = crypto.randomUUID();
+  const kind = String(form.get('kind') || 'file').slice(0, 24);
+  const note = String(form.get('note') || '').trim().slice(0, 300) || null;
+
+  let storage = 'd1';
+  let r2Key: string | null = null;
+  let data: string | null = null;
+
+  if (c.env.FILES) {
+    r2Key = `attachments/${id}/${filename}`;
+    await c.env.FILES.put(r2Key, await (file as File).arrayBuffer(), {
+      httpMetadata: { contentType: mime },
+      customMetadata: { order: orderId || '', customer: customerId || '', by: u.sub },
+    });
+    storage = 'r2';
+  } else {
+    // Base64 in D1, deliberately small: enough for a PO PDF or a drawing photo.
+    const buf = await (file as File).arrayBuffer();
+    const bytes = new Uint8Array(buf);
+    let bin = '';
+    for (let i = 0; i < bytes.length; i += 0x8000) {
+      bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+    }
+    data = btoa(bin);
+  }
+
+  await saveAttachment(c.env.DB, {
+    id, orderId, customerId, filename, mime, size, kind, storage, r2Key, data, note,
+    by: u.sub, byName: u.name || u.email || '',
+  });
+  await logEvent(c.env.DB, { sub: u.sub, name: u.name }, 'attachment', orderId || customerId, 'upload',
+    `${filename} attached${orderId ? ' to ' + orderId : ''}`);
+  return c.json({
+    ok: true,
+    id,
+    attachments: await listAttachments(c.env.DB, orderId ? { orderId } : { customerId }),
+    snapshot: await snapshot(c),
+  });
+});
+
+/** Download: streams the blob back with the original filename. */
+app.get('/api/attachments/:id/file', async (c) => {
+  const row = await getAttachment(c.env.DB, c.req.param('id'));
+  if (!row) return c.json({ error: 'not_found' }, 404);
+  const headers = new Headers();
+  headers.set('Content-Type', row.mime || 'application/octet-stream');
+  headers.set('Content-Disposition', `attachment; filename="${encodeURIComponent(row.filename)}"`);
+  headers.set('Cache-Control', 'private, max-age=3600');
+  if (row.storage === 'r2' && row.r2_key && c.env.FILES) {
+    const obj = await c.env.FILES.get(row.r2_key);
+    if (!obj) return c.json({ error: 'not_found', message: 'The stored file is missing' }, 404);
+    return new Response(obj.body, { headers });
+  }
+  if (!row.data) return c.json({ error: 'not_found', message: 'The stored file is missing' }, 404);
+  const bin = atob(row.data);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new Response(bytes, { headers });
+});
+
+app.delete('/api/attachments/:id', async (c) => {
+  const u: User = c.get('user');
+  const caps = c.get('caps') as Record<string, boolean>;
+  const row = await getAttachment(c.env.DB, c.req.param('id'));
+  if (!row) return c.json({ error: 'not_found' }, 404);
+  if (row.uploaded_by !== u.sub && !caps.delete) {
+    return c.json({ error: 'forbidden', message: 'Only the uploader or an admin can remove a file' }, 403);
+  }
+  if (row.storage === 'r2' && row.r2_key && c.env.FILES) {
+    try { await c.env.FILES.delete(row.r2_key); } catch { /* the row still goes */ }
+  }
+  await deleteAttachment(c.env.DB, row.id);
+  await logEvent(c.env.DB, { sub: u.sub, name: u.name }, 'attachment', row.order_id || row.customer_id, 'delete',
+    `${row.filename} removed`);
+  return c.json({
+    ok: true,
+    attachments: await listAttachments(c.env.DB, row.order_id ? { orderId: row.order_id } : { customerId: row.customer_id || '' }),
+    snapshot: await snapshot(c),
+  });
+});
+
+// ---------------------------------------------------------------- saved views (server)
+app.get('/api/views', async (c) => {
+  const me: User = c.get('user');
+  const rows = await listSavedViews(c.env.DB, me.sub);
+  return c.json({
+    views: rows.map((v) => ({ id: v.id, name: v.name, scope: v.scope, filters: JSON.parse(v.filters || '{}') })),
+  });
+});
+
+app.post('/api/views', async (c) => {
+  const me: User = c.get('user');
+  const body = await jsonBody(c);
+  const name = str(body.name, 40);
+  if (!name) return c.json({ error: 'bad_request', message: 'Give the view a name' }, 400);
+  const filters = JSON.stringify(body.filters || {});
+  const id = 'v' + crypto.randomUUID().slice(0, 8);
+  await createSavedView(c.env.DB, { id, sub: me.sub, name, scope: str(body.scope, 20) || 'orders', filters });
+  return c.json({ ok: true, id, views: (await listSavedViews(c.env.DB, me.sub)).map((v) => ({ id: v.id, name: v.name, scope: v.scope, filters: JSON.parse(v.filters || '{}') })) });
+});
+
+app.delete('/api/views/:id', async (c) => {
+  const me: User = c.get('user');
+  await deleteSavedView(c.env.DB, c.req.param('id'), me.sub);
+  return c.json({ ok: true, views: (await listSavedViews(c.env.DB, me.sub)).map((v) => ({ id: v.id, name: v.name, scope: v.scope, filters: JSON.parse(v.filters || '{}') })) });
 });
 
 // ---------------------------------------------------------------- customers
