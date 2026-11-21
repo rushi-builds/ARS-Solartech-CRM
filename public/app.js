@@ -282,6 +282,7 @@ const S = {
   notes: { orderId: null, rows: null, loading: false },
   // Bulk selection on the orders table.
   picked: new Set(),
+  analytics: { data: null, loading: false },
 };
 
 const FULL_ROLES = ['owner', 'admin', 'manager'];
@@ -296,6 +297,7 @@ const VIEWS = {
   activity: { title: 'Activity', sub: 'Every change, who made it and when', icon: 'clock' },
   sessions: { title: 'Sessions & devices', sub: 'Where this workspace is signed in, and how to sign it out', icon: 'shield' },
   customers: { title: 'Customers', sub: 'The customer master behind every order', icon: 'building' },
+  analytics: { title: 'Analytics', sub: 'Throughput, department cycle times and delivery performance', icon: 'chart' },
 };
 
 /* ── API ───────────────────────────────────────────────────── */
@@ -486,6 +488,7 @@ function render() {
     activity: viewActivity,
     sessions: viewSessions,
     customers: viewCustomers,
+    analytics: viewAnalytics,
   })[S.view]();
   const viewEl = $('#view');
   viewEl.innerHTML = html;
@@ -614,7 +617,7 @@ function reqAsk(r) {
 
 function renderNav() {
   const items = [
-    { id: 'dashboard' }, { id: 'orders' }, { id: 'dispatch' }, { id: 'customers' }, { id: 'capacity' },
+    { id: 'dashboard' }, { id: 'orders' }, { id: 'dispatch' }, { id: 'customers' }, { id: 'capacity' }, { id: 'analytics' },
     { sep: 'Administration' },
     { id: 'users', hide: !cap('users') && !cap('settings') },
     { id: 'settings', hide: !cap('settings') && !cap('users') },
@@ -865,11 +868,14 @@ function viewOrders() {
       <button class="btn ghost small" data-act="bulk-clear">Clear</button>
     </div>` : ''}
     <span style="flex:1"></span>
+    <button class="btn ghost small" data-act="save-view" title="Save these filters">Save view</button>
+    <button class="btn ghost small" data-act="print" title="Print this list">Print</button>
     <button class="btn ghost small" data-act="import">Import</button>
     <button class="btn ghost small" data-act="export">Export</button>
     <button class="btn primary small" data-act="new-order" ${cap('order') ? '' : 'disabled'}>+ New order</button>
     </div>
 
+    ${viewChips()}
     <div class="card-head">
       <div class="lead">
         <span class="head-ico">${icon('box')}</span>
@@ -1597,6 +1603,199 @@ function viewCustomers() {
   </div>`;
 }
 
+
+
+/* ── saved views ──────────────────────────────────────────���────
+   Filters people rebuild every morning ("my late orders", "this month's
+   dispatch") should be a click, not five dropdowns. Stored per browser, which
+   keeps it private and needs no migration. */
+const VIEW_KEY = 'ars-saved-views';
+
+function savedViews() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(VIEW_KEY) || '[]');
+    return Array.isArray(raw) ? raw : [];
+  } catch { return []; }
+}
+
+function writeSavedViews(list) {
+  try { localStorage.setItem(VIEW_KEY, JSON.stringify(list.slice(0, 12))); } catch { /* private mode */ }
+}
+
+function currentFilterState() {
+  return { q: S.q, status: S.status, rag: S.rag, stage: S.stage };
+}
+
+function applyView(id) {
+  const v = savedViews().find((x) => x.id === id);
+  if (!v) return;
+  S.q = v.f.q || '';
+  S.status = v.f.status || 'all';
+  S.rag = v.f.rag || 'all';
+  S.stage = v.f.stage || 'all';
+  if (S.view !== 'orders') location.hash = '#/orders';
+  render();
+  toast(`View “${v.name}” applied`, 'ok');
+}
+
+function deleteView(id) {
+  writeSavedViews(savedViews().filter((x) => x.id !== id));
+  render();
+}
+
+function saveViewModal() {
+  modal({
+    title: 'Save this view',
+    sub: 'The filter you are looking at, available in one click next time.',
+    body: field('Name *', 'name', '', 'text', 'required maxlength="40" placeholder="Late design work"'),
+    submit: 'Save view',
+    async onSubmit(data) {
+      const name = String(data.name || '').trim();
+      if (!name) throw new Error('Give the view a name');
+      const list = savedViews().filter((v) => v.name.toLowerCase() !== name.toLowerCase());
+      list.unshift({ id: 'v' + Date.now(), name, f: currentFilterState() });
+      writeSavedViews(list);
+      closeModal();
+      render();
+      toast('View saved', 'ok');
+    },
+  });
+}
+
+function viewChips() {
+  const list = savedViews();
+  if (!list.length) return '';
+  return `<div class="view-chips">
+    <span class="vc-label">Saved</span>
+    ${list.map((v) => `<span class="view-chip" data-act="apply-view" data-view="${esc(v.id)}" title="${esc(describeFilters(v.f))}">
+      ${esc(v.name)}
+      <button class="vc-x" data-act="del-view" data-view="${esc(v.id)}" title="Remove this view">×</button>
+    </span>`).join('')}
+  </div>`;
+}
+
+function describeFilters(f) {
+  const parts = [];
+  if (f.q) parts.push(`search “${f.q}”`);
+  if (f.status && f.status !== 'all') parts.push(f.status);
+  if (f.rag && f.rag !== 'all') parts.push(f.rag.toLowerCase());
+  if (f.stage && f.stage !== 'all') parts.push('stage ' + f.stage);
+  return parts.length ? parts.join(' · ') : 'everything';
+}
+
+/* ── analytics ─────────────────────────────────────────────── */
+async function loadAnalytics() {
+  if (S.analytics.loading) return;
+  S.analytics.loading = true;
+  try {
+    const res = await api('/api/analytics');
+    S.analytics.data = res.analytics;
+  } catch (e) {
+    toast(e.message || 'Could not load analytics', 'err');
+  } finally {
+    S.analytics.loading = false;
+  }
+  if (S.view === 'analytics') render();
+}
+
+/** A tiny inline bar chart — no chart library, no build weight. */
+function bars(rows, pick, opts = {}) {
+  const max = Math.max(1, ...rows.map((r) => Number(pick.value(r)) || 0));
+  const fmtv = opts.format || ((v) => n1(v));
+  return `<div class="bars">${rows.map((r) => {
+    const v = Number(pick.value(r)) || 0;
+    const w = Math.max(v > 0 ? 3 : 0, Math.round((v / max) * 100));
+    return `<div class="bar-row" title="${esc(pick.label(r))}: ${esc(fmtv(v))}">
+      <span class="bar-lbl">${esc(pick.label(r))}</span>
+      <span class="bar-track"><i class="${pick.tone ? pick.tone(r) : ''}" style="width:${w}%"></i></span>
+      <b class="bar-val">${esc(fmtv(v))}</b>
+    </div>`;
+  }).join('')}</div>`;
+}
+
+function viewAnalytics() {
+  const A = S.analytics;
+  if (!A.data && !A.loading) {
+    loadAnalytics();
+    return `<div class="empty">Loading analytics…</div>`;
+  }
+  const d = A.data || { months: [], cycle: [], load: [], delivery: {} };
+  const del = d.delivery || {};
+  const peak = d.months.reduce((m, x) => (x.mt > (m.mt || 0) ? x : m), { mt: 0 });
+
+  return `
+  <div class="grid cols-4">
+    ${kpiTile('On-time delivery', del.otif === null ? '—' : del.otif + '%', del.decided ? `${del.onTime} of ${del.decided} closed orders` : 'no closed orders yet', del.otif === null ? 'blue' : del.otif >= 90 ? 'green' : del.otif >= 75 ? 'amber' : 'red')}
+    ${kpiTile('Lead time', del.leadTime === null ? '—' : del.leadTime + ' d', 'confirmation to dispatch', 'accent')}
+    ${kpiTile('Book to ship', del.monthsOfBook === null ? '—' : del.monthsOfBook + ' mo', 'open MT at recent throughput', 'blue')}
+    ${kpiTile('Peak month', n1(peak.mt) + ' MT', peak.label || '—', 'dispatched in the window', 'green')}
+  </div>
+
+  <div class="split-2" style="margin-top:14px">
+    <div class="card">
+      <div class="card-head">
+        <div class="lead"><span class="head-ico grey">${icon('chart')}</span>
+          <div><p class="h-eyebrow">Throughput</p><h3>Production completed per month</h3></div></div>
+        <span class="hint">MT, by production-done date</span>
+      </div>
+      ${d.months.length ? bars(d.months, {
+        label: (r) => r.label,
+        value: (r) => r.mt,
+        tone: (r) => (r.mt >= (peak.mt || 0) && r.mt > 0 ? 'good' : ''),
+      }) : '<div class="empty">No completed production yet.</div>'}
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <div class="lead"><span class="head-ico grey">${icon('clock')}</span>
+          <div><p class="h-eyebrow">Departments</p><h3>Where the work is sitting</h3></div></div>
+        <span class="hint">open orders by current department</span>
+      </div>
+      ${d.load.length ? bars(d.load, {
+        label: (r) => r.dept,
+        value: (r) => r.open,
+        tone: (r) => (r.late > 0 ? 'bad' : ''),
+      }, { format: (v) => String(v) }) : '<div class="empty">Nothing open right now.</div>'}
+      ${d.load.some((l) => l.late) ? `<p class="sub-line" style="margin-top:10px">${d.load.filter((l) => l.late).map((l) => `${esc(l.dept)}: ${l.late} late`).join(' · ')}</p>` : ''}
+    </div>
+  </div>
+
+  <div class="card flush" style="margin-top:14px">
+    <div class="card-head">
+      <div class="lead"><span class="head-ico grey">${icon('clock')}</span>
+        <div><p class="h-eyebrow">Cycle time</p><h3>How long each stage really takes</h3></div></div>
+      <span class="hint">committed date minus the previous stage</span>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Stage</th><th>Department</th><th class="num">Samples</th><th class="num">Average</th>
+          <th class="num">Slowest</th><th class="num">Plan</th><th>Verdict</th></tr></thead>
+        <tbody>
+          ${d.cycle.length ? d.cycle.map((c) => {
+            const over = c.target > 0 && c.avg > c.target;
+            return `<tr>
+              <td><span class="cust">${esc(c.label)}</span></td>
+              <td>${esc(c.dept)}</td>
+              <td class="num">${c.samples}</td>
+              <td class="num"><b>${c.avg} d</b></td>
+              <td class="num">${c.worst} d</td>
+              <td class="num">${c.target ? c.target + ' d' : '—'}</td>
+              <td>${!c.target ? '<span class="badge grey">no plan</span>'
+                : over ? `<span class="badge amber">${Math.round((c.avg - c.target) * 10) / 10} d over</span>`
+                : '<span class="badge green">within plan</span>'}</td>
+            </tr>`;
+          }).join('') : '<tr><td colspan="7" class="empty">Mark some stages done — the cycle times appear here.</td></tr>'}
+        </tbody>
+      </table>
+    </div>
+    <div style="padding:13px 18px;border-top:1px solid var(--line);background:var(--surface-2)">
+      <p class="sub-line" style="margin:0">
+        Average is the arithmetic mean of every completed order; the slowest is the worst single case — that is the one to look at when a customer complains.
+      </p>
+    </div>
+  </div>`;
+}
+
 /* ── settings ──────────────────────────────────────────────── */
 function viewSettings() {
   const s = S.d.settings;
@@ -1864,6 +2063,112 @@ function closeModal() {
   const host = $('#modal');
   host.classList.remove('open');
   host.innerHTML = '';
+}
+
+
+/* ── command palette (Ctrl/⌘ K) ────────────────────────────────
+   The fastest way through the app: jump to a screen, find an order or a
+   customer, or run an action you already know you want. Same idea as Linear,
+   Notion and GitHub. */
+const PALETTE = { open: false, q: '', index: 0, items: [] };
+
+function paletteItems(query) {
+  const q = String(query || '').trim().toLowerCase();
+  const out = [];
+  const screens = Object.entries(VIEWS).filter(([id]) => {
+    if (id === 'users' || id === 'settings') return !!(cap('users') || cap('settings'));
+    return true;
+  });
+  for (const [id, v] of screens) {
+    out.push({ kind: 'Go to', label: v.title, hint: v.sub, run: () => { location.hash = '#/' + id; } });
+  }
+  if (cap('order')) out.push({ kind: 'Action', label: 'New order', hint: 'Create an order from a customer PO', run: () => orderModal(null) });
+  if (cap('order')) out.push({ kind: 'Action', label: 'New customer', hint: 'Add to the customer master', run: () => customerModal(null) });
+  if (cap('disp')) out.push({ kind: 'Action', label: 'Dispatch entry', hint: 'Record a batch, vehicle and invoice', run: () => dispatchModal(null) });
+  out.push({ kind: 'Action', label: 'Export orders', hint: 'Download the order book as CSV', run: () => exportOrders() });
+  out.push({ kind: 'Action', label: 'Toggle theme', hint: 'Light / dark', run: () => toggleTheme() });
+
+  const orders = (S.d && S.d.orders) || [];
+  const customers = S.customers.rows || [];
+  const orderItem = (o) => ({
+    kind: 'Order',
+    label: `${o.id} · ${o.customer || 'No customer'}`,
+    hint: `${o.live.stage} · ${n1(o.mt)} MT · ${o.live.rag}`,
+    run: () => { location.hash = '#/orders'; openDrawer(o.id); },
+  });
+  const custItem = (c) => ({
+    kind: 'Customer',
+    label: c.name,
+    hint: [c.city, c.contact, c.orders ? `${c.orders} orders` : ''].filter(Boolean).join(' · '),
+    run: () => { S.customers.q = c.name; location.hash = '#/customers'; },
+  });
+
+  if (!q) return out.slice(0, 9).concat(orders.slice(0, 3).map(orderItem));
+  const m = (text) => String(text || '').toLowerCase().includes(q);
+  return [
+    ...out.filter((i) => m(i.label) || m(i.hint)),
+    ...orders.filter((o) => m(o.id) || m(o.customer) || m(o.project)).slice(0, 6).map(orderItem),
+    ...customers.filter((c) => m(c.name) || m(c.city) || m(c.contact)).slice(0, 4).map(custItem),
+  ].slice(0, 24);
+}
+
+function paletteRender() {
+  const host = $('#palette');
+  if (!host) return;
+  const items = PALETTE.items;
+  if (PALETTE.index >= items.length) PALETTE.index = Math.max(0, items.length - 1);
+  host.innerHTML = `
+    <div class="palette-backdrop" data-act="palette-close"></div>
+    <div class="palette" role="dialog" aria-label="Command palette">
+      <div class="palette-input">
+        ${icon('search')}
+        <input id="paletteQ" value="${esc(PALETTE.q)}" placeholder="Search orders, customers, screens, actions…" autocomplete="off" spellcheck="false" />
+        <kbd>esc</kbd>
+      </div>
+      <div class="palette-list">
+        ${items.length ? items.map((it, i) => `
+          <button class="palette-item ${i === PALETTE.index ? 'sel' : ''}" data-palette-i="${i}">
+            <span class="pi-kind">${esc(it.kind)}</span>
+            <span class="pi-main"><b>${esc(it.label)}</b>${it.hint ? `<small>${esc(it.hint)}</small>` : ''}</span>
+            ${i === PALETTE.index ? '<span class="pi-enter">↵</span>' : ''}
+          </button>`).join('') : '<div class="empty" style="padding:22px">Nothing matches that.</div>'}
+      </div>
+      <div class="palette-foot">
+        <span><kbd>↑</kbd><kbd>↓</kbd> move</span><span><kbd>↵</kbd> open</span><span><kbd>esc</kbd> close</span>
+      </div>
+    </div>`;
+  host.hidden = false;
+  const input = $('#paletteQ');
+  if (input) { input.focus(); input.setSelectionRange(input.value.length, input.value.length); }
+}
+
+function paletteOpen() {
+  if (!S.d) return;
+  PALETTE.open = true;
+  PALETTE.q = '';
+  PALETTE.index = 0;
+  PALETTE.items = paletteItems('');
+  paletteRender();
+  if (!S.customers.rows) api('/api/customers').then((r) => { S.customers.rows = r.customers || []; }).catch(() => {});
+}
+
+function paletteClose() {
+  PALETTE.open = false;
+  const host = $('#palette');
+  if (host) { host.hidden = true; host.innerHTML = ''; }
+}
+
+function paletteMove(delta) {
+  if (!PALETTE.items.length) return;
+  PALETTE.index = (PALETTE.index + delta + PALETTE.items.length) % PALETTE.items.length;
+  paletteRender();
+}
+
+function paletteRun(i) {
+  const item = PALETTE.items[i];
+  if (!item) return;
+  paletteClose();
+  try { item.run(); } catch (e) { toast(e.message || 'Could not run that', 'err'); }
 }
 
 function modal(opts) {
@@ -2585,6 +2890,12 @@ function exportDispatches() {
    actions
    ══════════════════════════════════════════════════════════════ */
 const ACTIONS = {
+  'palette-open': () => paletteOpen(),
+  'palette-close': () => paletteClose(),
+  'print': () => window.print(),
+  'save-view': () => saveViewModal(),
+  'apply-view': (el) => applyView(el.dataset.view),
+  'del-view': (el) => deleteView(el.dataset.view),
   'new-customer': () => customerModal(null),
   'edit-customer': (el) => {
     const c = (S.customers.rows || []).find((x) => x.id === el.dataset.id);
@@ -3065,7 +3376,44 @@ window.addEventListener('hashchange', () => {
 });
 
 document.addEventListener('keydown', (ev) => {
+  // ⌘K / Ctrl+K — the shortcut people already have in their fingers.
+  if ((ev.metaKey || ev.ctrlKey) && String(ev.key).toLowerCase() === 'k') {
+    ev.preventDefault();
+    if (PALETTE.open) paletteClose(); else paletteOpen();
+    return;
+  }
+  if (PALETTE.open) {
+    if (ev.key === 'Escape') { ev.preventDefault(); paletteClose(); return; }
+    if (ev.key === 'ArrowDown') { ev.preventDefault(); paletteMove(1); return; }
+    if (ev.key === 'ArrowUp') { ev.preventDefault(); paletteMove(-1); return; }
+    if (ev.key === 'Enter') {
+      // if focus is in the search box, Enter runs the highlighted row
+      ev.preventDefault();
+      paletteRun(PALETTE.index);
+      return;
+    }
+  }
   if (ev.key === 'Escape') { closeModal(); closeDrawer(); }
+  // A single "/" focuses the search box on the screen you are on.
+  if (ev.key === '/' && !PLAINTEXT.includes(document.activeElement && document.activeElement.tagName)) {
+    const box = $('#q') || $('#custQ');
+    if (box) { ev.preventDefault(); box.focus(); }
+  }
+});
+
+const PLAINTEXT = ['INPUT', 'TEXTAREA', 'SELECT'];
+
+document.addEventListener('input', (ev) => {
+  if (ev.target.id !== 'paletteQ') return;
+  PALETTE.q = ev.target.value;
+  PALETTE.index = 0;
+  PALETTE.items = paletteItems(PALETTE.q);
+  paletteRender();
+});
+
+document.addEventListener('click', (ev) => {
+  const item = ev.target.closest && ev.target.closest('[data-palette-i]');
+  if (item) { paletteRun(Number(item.dataset.paletteI)); }
 });
 
 /* ── boot ──────────────────────────────────────────────────── */

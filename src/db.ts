@@ -1,5 +1,6 @@
 import {
-  DEFAULT_ACCESS, DEFAULT_SETTINGS, STAGES, validDate, type AccessMap, type Actuals, type Settings,
+  DEFAULT_ACCESS, DEFAULT_SETTINGS, STAGES, STAGE_META, validDate, dayDiff, todayISO,
+  type AccessMap, type Actuals, type Settings,
   type StageKey, liveStatus, planOrder, capacityPlan, type PlanOrder, NUMBERED_STAGES,
 } from './plan';
 
@@ -1126,6 +1127,124 @@ export function workload(
 }
 
 // ---------------- dashboard + capacity payloads ----------------
+
+/**
+ * The numbers a plant manager actually asks for, computed from the order book
+ * rather than stored: monthly throughput, the time each department really takes,
+ * and who is sitting on work right now.
+ */
+export function analytics(orders: EnrichedOrder[], s: Settings, months = 6) {
+  const today = todayISO();
+  const closed = orders.filter((o) => o.live.rag === 'CLOSED' || o.status === 'closed');
+
+  // ---- monthly throughput (last N months incl. current) ----
+  const now = new Date(today + 'T00:00:00Z');
+  const bucket: { key: string; label: string; orders: number; mt: number }[] = [];
+  for (let i = months - 1; i >= 0; i--) {
+    const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - i, 1));
+    bucket.push({
+      key: d.toISOString().slice(0, 7),
+      label: d.toLocaleString('en-GB', { month: 'short', timeZone: 'UTC' }),
+      orders: 0,
+      mt: 0,
+    });
+  }
+  const byKey = new Map(bucket.map((b) => [b.key, b]));
+  for (const o of orders) {
+    const done = o.a.pf || o.a.qc || o.a.dsp;
+    if (!done) continue;
+    const b = byKey.get(String(done).slice(0, 7));
+    if (!b) continue;
+    b.orders += 1;
+    b.mt += Number(o.mt) || 0;
+  }
+  for (const b of bucket) b.mt = Math.round(b.mt * 10) / 10;
+
+  // ---- stage cycle time: committed date minus the previous stage's date ----
+  const STAGE_ORDER: StageKey[] = ['des', 'apr', 'mat', 'ps', 'pf', 'qc', 'dsp'];
+  const cycle: { key: string; label: string; dept: string; samples: number; avg: number; worst: number; target: number }[] = [];
+  for (let i = 0; i < STAGE_ORDER.length; i++) {
+    const key = STAGE_ORDER[i];
+    const meta = STAGE_META.find((m) => m.key === key)!;
+    const prevKey = i === 0 ? null : STAGE_ORDER[i - 1];
+    const durs: number[] = [];
+    for (const o of orders) {
+      const at = o.a[key];
+      if (!at) continue;
+      // measured from the previous stage when it exists, else from confirmation
+      const from = prevKey ? o.a[prevKey] : o.conf_date;
+      if (!from) continue;
+      const d = dayDiff(validDate(from) || '', validDate(at) || '');
+      if (Number.isFinite(d) && d >= 0 && d < 400) durs.push(d);
+    }
+    if (!durs.length) continue;
+    durs.sort((a, b) => a - b);
+    const avg = durs.reduce((x, y) => x + y, 0) / durs.length;
+    cycle.push({
+      key,
+      label: meta.actual,
+      dept: meta.dept,
+      samples: durs.length,
+      avg: Math.round(avg * 10) / 10,
+      worst: durs[durs.length - 1],
+      target: key === 'des' ? s.dur.des : key === 'apr' ? s.dur.apr : key === 'ps' ? s.dur.pro : 0,
+    });
+  }
+
+  // ---- where the work is sitting, per department ----
+  const depts = [...new Set(orders.map((o) => o.live.dept).filter(Boolean))];
+  const load = depts
+    .map((dept) => {
+      const open = orders.filter((o) => o.live.dept === dept && o.live.rag !== 'CLOSED' && o.status === 'open');
+      const late = open.filter((o) => o.live.daysOverdue > 0);
+      return {
+        dept,
+        open: open.length,
+        late: late.length,
+        mt: Math.round(open.reduce((x, o) => x + (Number(o.mt) || 0), 0) * 10) / 10,
+        oldest: open.reduce((m, o) => Math.max(m, o.live.daysOverdue || 0), 0),
+      };
+    })
+    .sort((a, b) => b.open - a.open);
+
+  // ---- delivery performance: did we make the customer's date? ----
+  const decided = closed.filter((o) => o.due_date && (o.a.dsp || o.approved_at));
+  const onTime = decided.filter((o) => {
+    const done = validDate(String(o.a.dsp || o.approved_at).slice(0, 10));
+    return done && done <= (validDate(o.due_date) || '9999-12-31');
+  }).length;
+  const otif = decided.length ? Math.round((onTime / decided.length) * 100) : null;
+
+  const leadSamples = decided
+    .map((o) => (o.conf_date && o.a.dsp ? dayDiff(validDate(o.conf_date) || '', validDate(o.a.dsp) || '') : NaN))
+    .filter((d) => Number.isFinite(d) && d >= 0);
+  const leadTime = leadSamples.length
+    ? Math.round((leadSamples.reduce((x, y) => x + y, 0) / leadSamples.length) * 10) / 10
+    : null;
+
+  return {
+    months: bucket,
+    cycle,
+    load,
+    delivery: {
+      otif,
+      decided: decided.length,
+      onTime,
+      leadTime,
+      // A simple forecast: open MT divided by the last three months' average
+      // throughput, in months. Null when there is nothing to divide by.
+      monthsOfBook: (() => {
+        const openMt = orders
+          .filter((o) => o.status === 'open' && o.live.rag !== 'CLOSED')
+          .reduce((x, o) => x + (Number(o.mt) || 0), 0);
+        const recent = bucket.slice(-3);
+        const avgMt = recent.reduce((x, b) => x + b.mt, 0) / Math.max(1, recent.length);
+        return avgMt > 0 ? Math.round((openMt / avgMt) * 10) / 10 : null;
+      })(),
+    },
+  };
+}
+
 export function dashboard(orders: EnrichedOrder[], weeks = 16, settings: Settings) {
   const active = orders.filter((o) => o.live.rag !== 'CLOSED' && o.status === 'open');
   const closed = orders.filter((o) => o.live.rag === 'CLOSED' || o.status === 'closed');

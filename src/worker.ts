@@ -82,6 +82,7 @@ import {
   listOrderTags,
   setOrderTags,
   listAllTags,
+  analytics,
   listEvents,
   listEventEntities,
   listNotifications,
@@ -1566,6 +1567,19 @@ app.get('/api/activity', async (c) => {
   });
 });
 
+
+// ---------------------------------------------------------------- analytics
+app.get('/api/analytics', async (c) => {
+  // Computed from the same snapshot data everyone else sees, so the numbers can
+  // never disagree with the order list on the next tab.
+  const db = c.env.DB;
+  const [orders, stages, dispatches, settings] = await Promise.all([
+    listOrderRows(db), listStageRows(db), listDispatchRows(db), getSettings(db),
+  ]);
+  const roster = await deptRoster(db);
+  const enriched = enrich(orders, stages, dispatches, settings, headsFrom(roster), todayISO());
+  return c.json({ analytics: analytics(enriched, settings) });
+});
 
 // ---------------------------------------------------------------- customers
 app.get('/api/customers', async (c) => {
