@@ -22,7 +22,8 @@ const DDL: string[] = [
   )`,
   `CREATE TABLE IF NOT EXISTS customers (
     id TEXT PRIMARY KEY, name TEXT NOT NULL, contact TEXT, phone TEXT,
-    email TEXT, gstin TEXT, address TEXT, created_at TEXT NOT NULL
+    email TEXT, gstin TEXT, address TEXT, created_at TEXT NOT NULL,
+    updated_at TEXT, city TEXT, state TEXT, pincode TEXT, notes TEXT, active INTEGER NOT NULL DEFAULT 1
   )`,
   `CREATE TABLE IF NOT EXISTS orders (
     id TEXT PRIMARY KEY, customer TEXT, project TEXT, structure_type TEXT,
@@ -95,6 +96,65 @@ const ALTERS: string[] = [
   )`,
   `CREATE INDEX IF NOT EXISTS idx_notifications_at ON notifications(at DESC)`,
   `CREATE INDEX IF NOT EXISTS idx_notifications_sub ON notifications(sub)`,
+  // Session metadata so a user can see and revoke their own signed-in devices.
+  `ALTER TABLE sessions ADD COLUMN user_agent TEXT`,
+  `ALTER TABLE sessions ADD COLUMN ip TEXT`,
+  `ALTER TABLE sessions ADD COLUMN last_seen TEXT`,
+  `CREATE INDEX IF NOT EXISTS idx_sessions_expiry ON sessions(expires_at)`,
+  // Foreign keys are declared with ON DELETE CASCADE, but SQLite only enforces
+  // them when PRAGMA foreign_keys is on, and D1 leaves it off. These indexes make
+  // the explicit deletes in the app cheap instead.
+  `CREATE INDEX IF NOT EXISTS idx_stage_order_stage ON order_stages(order_id, stage)`,
+  `CREATE INDEX IF NOT EXISTS idx_orders_created ON orders(created_at DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customer)`,
+
+  // A note is a comment on an order: the running conversation that used to live
+  // in WhatsApp. Kept separate from the audit trail, which records *changes*,
+  // not what people said to each other about them.
+  `CREATE TABLE IF NOT EXISTS order_notes (
+    id TEXT PRIMARY KEY, order_id TEXT NOT NULL, body TEXT NOT NULL,
+    author_sub TEXT, author_name TEXT, kind TEXT NOT NULL DEFAULT 'note',
+    pinned INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, edited_at TEXT
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_notes_order ON order_notes(order_id, created_at DESC)`,
+
+  // Free-form labels on an order (urgent, rework, hold...) plus the customer
+  // master lookup. Both are additive: an order with no tags behaves exactly as
+  // it did before.
+  `CREATE TABLE IF NOT EXISTS order_tags (
+    order_id TEXT NOT NULL, tag TEXT NOT NULL, added_by TEXT, added_at TEXT NOT NULL,
+    PRIMARY KEY (order_id, tag)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_tags_tag ON order_tags(tag)`,
+
+  `ALTER TABLE customers ADD COLUMN updated_at TEXT`,
+  `ALTER TABLE customers ADD COLUMN city TEXT`,
+  `ALTER TABLE customers ADD COLUMN state TEXT`,
+  `ALTER TABLE customers ADD COLUMN pincode TEXT`,
+  `ALTER TABLE customers ADD COLUMN notes TEXT`,
+  `ALTER TABLE customers ADD COLUMN active INTEGER NOT NULL DEFAULT 1`,
+  `CREATE INDEX IF NOT EXISTS idx_customers_name ON customers(name COLLATE NOCASE)`,
+
+  // Attachments. The blob lives in R2 when the bucket is bound, and in the
+  // `data` column when it is not, so the feature works on a plain deployment
+  // and on the free tier without a second service to configure.
+  `CREATE TABLE IF NOT EXISTS attachments (
+    id TEXT PRIMARY KEY, order_id TEXT, customer_id TEXT,
+    filename TEXT NOT NULL, mime TEXT, size INTEGER NOT NULL DEFAULT 0,
+    kind TEXT NOT NULL DEFAULT 'file', storage TEXT NOT NULL DEFAULT 'd1',
+    r2_key TEXT, data TEXT, note TEXT,
+    uploaded_by TEXT, uploaded_name TEXT, created_at TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_attachments_order ON attachments(order_id, created_at DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_attachments_customer ON attachments(customer_id, created_at DESC)`,
+
+  // Saved views live on the server when someone wants them on every device;
+  // the browser-only version stays as the fallback.
+  `CREATE TABLE IF NOT EXISTS saved_views (
+    id TEXT PRIMARY KEY, sub TEXT NOT NULL, name TEXT NOT NULL,
+    scope TEXT NOT NULL DEFAULT 'orders', filters TEXT NOT NULL, created_at TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_saved_views_sub ON saved_views(sub, scope)`,
 ];
 
 let ready: Promise<void> | null = null;

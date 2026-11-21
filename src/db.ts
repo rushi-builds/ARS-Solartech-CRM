@@ -1,5 +1,6 @@
 import {
-  DEFAULT_ACCESS, DEFAULT_SETTINGS, STAGES, validDate, type AccessMap, type Actuals, type Settings,
+  DEFAULT_ACCESS, DEFAULT_SETTINGS, STAGES, STAGE_META, validDate, dayDiff, todayISO,
+  type AccessMap, type Actuals, type Settings,
   type StageKey, liveStatus, planOrder, capacityPlan, type PlanOrder, NUMBERED_STAGES,
 } from './plan';
 
@@ -211,11 +212,91 @@ export async function setPassword(db: D1Database, sub: string, passHash: string)
 }
 
 // ---------------- sessions ----------------
-export async function createSession(db: D1Database, sub: string, tokenHash: string, expiresAt: string) {
+export async function createSession(
+  db: D1Database,
+  sub: string,
+  tokenHash: string,
+  expiresAt: string,
+  meta: { userAgent?: string | null; ip?: string | null } = {},
+) {
+  const at = nowISO();
   await db
-    .prepare('INSERT INTO sessions (token_hash, sub, created_at, expires_at) VALUES (?, ?, ?, ?)')
-    .bind(tokenHash, sub, nowISO(), expiresAt)
+    .prepare(
+      `INSERT INTO sessions (token_hash, sub, created_at, expires_at, user_agent, ip, last_seen)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .bind(tokenHash, sub, at, expiresAt, meta.userAgent || null, meta.ip || null, at)
     .run();
+}
+
+export type SessionInfo = {
+  id: string;          // short public id (first 16 chars of the hash) — never the token
+  token_hash: string;  // kept server-side only
+  created_at: string;
+  expires_at: string;
+  user_agent: string | null;
+  ip: string | null;
+  last_seen: string | null;
+  sub?: string;
+  email?: string | null;
+  name?: string | null;
+};
+
+/** Sessions for one user, newest first. */
+export async function listUserSessions(db: D1Database, sub: string): Promise<SessionInfo[]> {
+  const { results } = await db
+    .prepare(
+      `SELECT token_hash, created_at, expires_at, user_agent, ip, last_seen
+         FROM sessions WHERE sub = ? AND expires_at > ?
+        ORDER BY COALESCE(last_seen, created_at) DESC`,
+    )
+    .bind(sub, nowISO())
+    .all<SessionInfo>();
+  return (results || []).map((r) => ({ ...r, id: String(r.token_hash).slice(0, 16) }));
+}
+
+/** Sessions across every user, for the admin view. */
+export async function listAllSessions(db: D1Database, limit = 200): Promise<SessionInfo[]> {
+  const { results } = await db
+    .prepare(
+      `SELECT s.token_hash, s.created_at, s.expires_at, s.user_agent, s.ip, s.last_seen,
+              s.sub, u.email, u.name
+         FROM sessions s LEFT JOIN users u ON u.sub = s.sub
+        WHERE s.expires_at > ?
+        ORDER BY COALESCE(s.last_seen, s.created_at) DESC LIMIT ?`,
+    )
+    .bind(nowISO(), Math.min(1000, Math.max(1, limit)))
+    .all<SessionInfo>();
+  return (results || []).map((r) => ({ ...r, id: String(r.token_hash).slice(0, 16) }));
+}
+
+export async function touchSession(db: D1Database, tokenHash: string, lastSeen: string) {
+  // Cheap: only write when the stored value is older than an hour, so a busy
+  // screen does not rewrite the row on every poll.
+  await db
+    .prepare('UPDATE sessions SET last_seen = ? WHERE token_hash = ? AND (last_seen IS NULL OR last_seen < ?)')
+    .bind(lastSeen, tokenHash, new Date(Date.now() - 3600_000).toISOString())
+    .run();
+}
+
+export async function revokeSession(db: D1Database, idOrHash: string, sub?: string) {
+  const prefix = String(idOrHash || '');
+  if (prefix.length < 8) return 0;
+  const sql = sub
+    ? 'DELETE FROM sessions WHERE token_hash LIKE ? || \'%\' AND sub = ?'
+    : 'DELETE FROM sessions WHERE token_hash LIKE ? || \'%\'';
+  const stmt = sub ? db.prepare(sql).bind(prefix, sub) : db.prepare(sql).bind(prefix);
+  const res = await stmt.run();
+  return Number((res as any)?.meta?.changes ?? 1);
+}
+
+/** Every session except the current one — "sign out everywhere else". */
+export async function revokeOtherSessions(db: D1Database, sub: string, keepHash: string) {
+  const res = await db
+    .prepare('DELETE FROM sessions WHERE sub = ? AND token_hash != ?')
+    .bind(sub, keepHash)
+    .run();
+  return Number((res as any)?.meta?.changes ?? 0);
 }
 
 /** Session user, or null when the token is unknown/expired/disabled. */
@@ -639,12 +720,330 @@ export async function setOrderApproval(
     .run();
 }
 
+/**
+ * Deletes an order and everything hanging off it. Notifications point at the
+ * order too: leaving them behind put alerts for an order that no longer exists
+ * in people's bell, which then opened a blank drawer.
+ */
 export async function deleteOrder(db: D1Database, id: string) {
   await db.batch([
     db.prepare('DELETE FROM order_stages WHERE order_id = ?').bind(id),
     db.prepare('DELETE FROM dispatches WHERE order_id = ?').bind(id),
+    db.prepare('DELETE FROM notifications WHERE order_id = ?').bind(id),
+    db.prepare('DELETE FROM order_notes WHERE order_id = ?').bind(id),
+    db.prepare('DELETE FROM order_tags WHERE order_id = ?').bind(id),
+    db.prepare('DELETE FROM attachments WHERE order_id = ?').bind(id),
     db.prepare('DELETE FROM orders WHERE id = ?').bind(id),
   ]);
+}
+
+
+// ---------------- customers ----------------
+export type CustomerRow = {
+  id: string;
+  name: string;
+  contact: string | null;
+  phone: string | null;
+  email: string | null;
+  gstin: string | null;
+  address: string | null;
+  city: string | null;
+  state: string | null;
+  pincode: string | null;
+  notes: string | null;
+  active: number;
+  created_at: string;
+  updated_at: string | null;
+};
+
+export type CustomerWithStats = CustomerRow & {
+  orders: number;
+  open_orders: number;
+  total_mt: number;
+  last_order_at: string | null;
+};
+
+/**
+ * The customer master, joined against the order book so the list can show what
+ * each relationship is actually worth. Orders store the customer *name* (that
+ * is how the app was built and how imports arrive), so the join is on name and
+ * is defensive about case/whitespace.
+ */
+export async function listCustomers(db: D1Database): Promise<CustomerWithStats[]> {
+  const { results } = await db
+    .prepare(
+      `SELECT c.*,
+              COUNT(o.id) AS orders,
+              SUM(CASE WHEN o.status = 'open' THEN 1 ELSE 0 END) AS open_orders,
+              COALESCE(SUM(o.mt), 0) AS total_mt,
+              MAX(o.created_at) AS last_order_at
+         FROM customers c
+         LEFT JOIN orders o ON TRIM(LOWER(o.customer)) = TRIM(LOWER(c.name))
+        GROUP BY c.id
+        ORDER BY c.active DESC, c.name COLLATE NOCASE`,
+    )
+    .all<CustomerWithStats>();
+  return results || [];
+}
+
+export async function getCustomer(db: D1Database, id: string): Promise<CustomerRow | null> {
+  return (await db.prepare('SELECT * FROM customers WHERE id = ?').bind(id).first<CustomerRow>()) || null;
+}
+
+export async function saveCustomer(
+  db: D1Database,
+  id: string,
+  body: Record<string, any>,
+  isNew: boolean,
+): Promise<void> {
+  // D1 refuses to bind undefined, so a missing field is null, never undefined.
+  const pick = (k: string): string | null => {
+    const v = body[k];
+    if (v === undefined || v === null) return null;
+    const s = String(v).trim();
+    return s ? s.slice(0, 400) : null;
+  };
+  const name = pick('name');
+  const at = nowISO();
+  if (isNew) {
+    await db
+      .prepare(
+        `INSERT INTO customers (id, name, contact, phone, email, gstin, address, city, state, pincode, notes, active, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(
+        id, name || 'Unnamed', pick('contact'), pick('phone'), pick('email'), pick('gstin'),
+        pick('address'), pick('city'), pick('state'), pick('pincode'), pick('notes'),
+        body.active === undefined ? 1 : body.active ? 1 : 0, at, at,
+      )
+      .run();
+    return;
+  }
+  const cols: [string, any][] = [];
+  for (const k of ['name', 'contact', 'phone', 'email', 'gstin', 'address', 'city', 'state', 'pincode', 'notes']) {
+    if (body[k] === undefined) continue;
+    cols.push([k, pick(k)]);
+  }
+  if (body.active !== undefined) cols.push(['active', body.active ? 1 : 0]);
+  if (!cols.length) return;
+  const sets = cols.map(([k]) => `${k} = ?`).join(', ');
+  await db
+    .prepare(`UPDATE customers SET ${sets}, updated_at = ? WHERE id = ?`)
+    .bind(...cols.map(([, v]) => v), at, id)
+    .run();
+}
+
+export async function deleteCustomer(db: D1Database, id: string) {
+  await db.prepare('DELETE FROM customers WHERE id = ?').bind(id).run();
+}
+
+/**
+ * Customers that exist in the order book but not in the master yet. Used to
+ * offer a one-click "add these" on the customers screen, so ten years of orders
+ * do not have to be retyped.
+ */
+export async function missingCustomers(db: D1Database): Promise<{ name: string; orders: number }[]> {
+  const { results } = await db
+    .prepare(
+      `SELECT TRIM(o.customer) AS name, COUNT(*) AS orders
+         FROM orders o
+        WHERE COALESCE(TRIM(o.customer), '') != ''
+          AND NOT EXISTS (SELECT 1 FROM customers c WHERE TRIM(LOWER(c.name)) = TRIM(LOWER(o.customer)))
+        GROUP BY TRIM(LOWER(o.customer))
+        ORDER BY orders DESC, name COLLATE NOCASE`,
+    )
+    .all<{ name: string; orders: number }>();
+  return results || [];
+}
+
+
+// ---------------- attachments ----------------
+export type Attachment = {
+  id: string;
+  order_id: string | null;
+  customer_id: string | null;
+  filename: string;
+  mime: string | null;
+  size: number;
+  kind: string;
+  storage: string;
+  r2_key: string | null;
+  note: string | null;
+  uploaded_by: string | null;
+  uploaded_name: string | null;
+  created_at: string;
+};
+
+/** Everything except the blob, which is fetched separately on download. */
+export async function listAttachments(
+  db: D1Database,
+  where: { orderId?: string; customerId?: string },
+): Promise<Attachment[]> {
+  const col = where.orderId ? 'order_id' : 'customer_id';
+  const value = where.orderId || where.customerId || '';
+  const { results } = await db
+    .prepare(
+      `SELECT id, order_id, customer_id, filename, mime, size, kind, storage, r2_key, note,
+              uploaded_by, uploaded_name, created_at
+         FROM attachments WHERE ${col} = ? ORDER BY created_at DESC`,
+    )
+    .bind(value)
+    .all<Attachment>();
+  return results || [];
+}
+
+export async function countAttachments(db: D1Database): Promise<Record<string, number>> {
+  const { results } = await db
+    .prepare('SELECT order_id, COUNT(*) AS n FROM attachments WHERE order_id IS NOT NULL GROUP BY order_id')
+    .all<{ order_id: string; n: number }>();
+  const out: Record<string, number> = {};
+  for (const r of results || []) out[r.order_id] = r.n;
+  return out;
+}
+
+export async function saveAttachment(
+  db: D1Database,
+  row: {
+    id: string;
+    orderId: string | null;
+    customerId: string | null;
+    filename: string;
+    mime: string;
+    size: number;
+    kind: string;
+    storage: string;
+    r2Key: string | null;
+    data: string | null;
+    note: string | null;
+    by: string;
+    byName: string;
+  },
+) {
+  await db
+    .prepare(
+      `INSERT INTO attachments (id, order_id, customer_id, filename, mime, size, kind, storage, r2_key, data, note, uploaded_by, uploaded_name, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .bind(
+      row.id, row.orderId, row.customerId, row.filename, row.mime, row.size, row.kind,
+      row.storage, row.r2Key, row.data, row.note, row.by, row.byName, nowISO(),
+    )
+    .run();
+}
+
+export async function getAttachment(db: D1Database, id: string): Promise<(Attachment & { data: string | null }) | null> {
+  return (
+    (await db.prepare('SELECT * FROM attachments WHERE id = ?').bind(id).first<Attachment & { data: string | null }>()) ||
+    null
+  );
+}
+
+export async function deleteAttachment(db: D1Database, id: string) {
+  await db.prepare('DELETE FROM attachments WHERE id = ?').bind(id).run();
+}
+
+// ---------------- saved views (server-side) ----------------
+export type SavedView = {
+  id: string;
+  sub: string;
+  name: string;
+  scope: string;
+  filters: string;
+  created_at: string;
+};
+
+export async function listSavedViews(db: D1Database, sub: string): Promise<SavedView[]> {
+  const { results } = await db
+    .prepare('SELECT * FROM saved_views WHERE sub = ? ORDER BY created_at DESC LIMIT 30')
+    .bind(sub)
+    .all<SavedView>();
+  return results || [];
+}
+
+export async function createSavedView(db: D1Database, v: { id: string; sub: string; name: string; scope: string; filters: string }) {
+  await db
+    .prepare('INSERT INTO saved_views (id, sub, name, scope, filters, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+    .bind(v.id, v.sub, v.name, v.scope, v.filters, nowISO())
+    .run();
+}
+
+export async function deleteSavedView(db: D1Database, id: string, sub: string) {
+  await db.prepare('DELETE FROM saved_views WHERE id = ? AND sub = ?').bind(id, sub).run();
+}
+
+// ---------------- order notes ----------------
+export type OrderNote = {
+  id: string;
+  order_id: string;
+  body: string;
+  author_sub: string | null;
+  author_name: string | null;
+  kind: string;
+  pinned: number;
+  created_at: string;
+  edited_at: string | null;
+};
+
+export async function listOrderNotes(db: D1Database, orderId: string): Promise<OrderNote[]> {
+  const { results } = await db
+    .prepare('SELECT * FROM order_notes WHERE order_id = ? ORDER BY pinned DESC, created_at DESC')
+    .bind(orderId)
+    .all<OrderNote>();
+  return results || [];
+}
+
+export async function addOrderNote(
+  db: D1Database,
+  note: { orderId: string; body: string; kind?: string; authorSub: string; authorName: string; pinned?: boolean },
+) {
+  const id = crypto.randomUUID();
+  await db
+    .prepare(
+      `INSERT INTO order_notes (id, order_id, body, author_sub, author_name, kind, pinned, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .bind(id, note.orderId, note.body, note.authorSub, note.authorName, note.kind || 'note', note.pinned ? 1 : 0, nowISO())
+    .run();
+  return id;
+}
+
+export async function deleteOrderNote(db: D1Database, id: string, orderId: string) {
+  await db.prepare('DELETE FROM order_notes WHERE id = ? AND order_id = ?').bind(id, orderId).run();
+}
+
+// ---------------- order tags ----------------
+export async function listOrderTags(db: D1Database): Promise<Record<string, string[]>> {
+  const { results } = await db
+    .prepare('SELECT order_id, tag FROM order_tags ORDER BY added_at')
+    .all<{ order_id: string; tag: string }>();
+  const out: Record<string, string[]> = {};
+  for (const r of results || []) {
+    (out[r.order_id] = out[r.order_id] || []).push(r.tag);
+  }
+  return out;
+}
+
+/** Replaces an order's tags with exactly this list. */
+export async function setOrderTags(db: D1Database, orderId: string, tags: string[], by: string) {
+  const clean = [...new Set(tags.map((t) => String(t || '').trim().toLowerCase()).filter(Boolean))]
+    .filter((t) => t.length <= 24)
+    .slice(0, 8);
+  await db.batch([
+    db.prepare('DELETE FROM order_tags WHERE order_id = ?').bind(orderId),
+    ...clean.map((t) =>
+      db.prepare('INSERT INTO order_tags (order_id, tag, added_by, added_at) VALUES (?, ?, ?, ?)')
+        .bind(orderId, t, by, nowISO()),
+    ),
+  ]);
+  return clean;
+}
+
+/** Every tag in use, with how many orders carry it — for the filter bar. */
+export async function listAllTags(db: D1Database): Promise<{ tag: string; n: number }[]> {
+  const { results } = await db
+    .prepare('SELECT tag, COUNT(*) AS n FROM order_tags GROUP BY tag ORDER BY n DESC, tag')
+    .all<{ tag: string; n: number }>();
+  return results || [];
 }
 
 // ---------------- dispatches ----------------
@@ -703,12 +1102,39 @@ export async function logEvent(
     .run();
 }
 
-export async function listEvents(db: D1Database, limit = 200) {
-  const { results } = await db
-    .prepare('SELECT id, at, actor_name, entity, entity_id, action, detail FROM events ORDER BY id DESC LIMIT ?')
-    .bind(limit)
-    .all();
+export type EventFilter = {
+  limit?: number;
+  entity?: string;      // order | dispatch | user | settings | session | ...
+  actor?: string;       // actor sub
+  q?: string;           // free text over detail / entity_id / actor_name
+  before?: number;      // id < before, for "older" paging
+};
+
+export async function listEvents(db: D1Database, limitOrFilter: number | EventFilter = 200) {
+  const f: EventFilter = typeof limitOrFilter === 'number' ? { limit: limitOrFilter } : limitOrFilter || {};
+  const limit = Math.min(500, Math.max(1, Number(f.limit) || 200));
+  const where: string[] = [];
+  const args: any[] = [];
+  if (f.entity) { where.push('entity = ?'); args.push(f.entity); }
+  if (f.actor) { where.push('actor_sub = ?'); args.push(f.actor); }
+  if (f.before) { where.push('id < ?'); args.push(f.before); }
+  if (f.q) {
+    where.push('(detail LIKE ? OR entity_id LIKE ? OR actor_name LIKE ?)');
+    const like = `%${String(f.q).slice(0, 80)}%`;
+    args.push(like, like, like);
+  }
+  const sql =
+    `SELECT id, at, actor_sub, actor_name, entity, entity_id, action, detail FROM events
+     ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+     ORDER BY id DESC LIMIT ?`;
+  const { results } = await db.prepare(sql).bind(...args, limit).all();
   return results || [];
+}
+
+/** The entity types actually present, so the filter only offers real ones. */
+export async function listEventEntities(db: D1Database): Promise<string[]> {
+  const { results } = await db.prepare('SELECT DISTINCT entity FROM events ORDER BY entity').all<{ entity: string }>();
+  return (results || []).map((r) => r.entity);
 }
 
 // ---------------- notifications outbox ----------------
@@ -817,6 +1243,124 @@ export function workload(
 }
 
 // ---------------- dashboard + capacity payloads ----------------
+
+/**
+ * The numbers a plant manager actually asks for, computed from the order book
+ * rather than stored: monthly throughput, the time each department really takes,
+ * and who is sitting on work right now.
+ */
+export function analytics(orders: EnrichedOrder[], s: Settings, months = 6) {
+  const today = todayISO();
+  const closed = orders.filter((o) => o.live.rag === 'CLOSED' || o.status === 'closed');
+
+  // ---- monthly throughput (last N months incl. current) ----
+  const now = new Date(today + 'T00:00:00Z');
+  const bucket: { key: string; label: string; orders: number; mt: number }[] = [];
+  for (let i = months - 1; i >= 0; i--) {
+    const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - i, 1));
+    bucket.push({
+      key: d.toISOString().slice(0, 7),
+      label: d.toLocaleString('en-GB', { month: 'short', timeZone: 'UTC' }),
+      orders: 0,
+      mt: 0,
+    });
+  }
+  const byKey = new Map(bucket.map((b) => [b.key, b]));
+  for (const o of orders) {
+    const done = o.a.pf || o.a.qc || o.a.dsp;
+    if (!done) continue;
+    const b = byKey.get(String(done).slice(0, 7));
+    if (!b) continue;
+    b.orders += 1;
+    b.mt += Number(o.mt) || 0;
+  }
+  for (const b of bucket) b.mt = Math.round(b.mt * 10) / 10;
+
+  // ---- stage cycle time: committed date minus the previous stage's date ----
+  const STAGE_ORDER: StageKey[] = ['des', 'apr', 'mat', 'ps', 'pf', 'qc', 'dsp'];
+  const cycle: { key: string; label: string; dept: string; samples: number; avg: number; worst: number; target: number }[] = [];
+  for (let i = 0; i < STAGE_ORDER.length; i++) {
+    const key = STAGE_ORDER[i];
+    const meta = STAGE_META.find((m) => m.key === key)!;
+    const prevKey = i === 0 ? null : STAGE_ORDER[i - 1];
+    const durs: number[] = [];
+    for (const o of orders) {
+      const at = o.a[key];
+      if (!at) continue;
+      // measured from the previous stage when it exists, else from confirmation
+      const from = prevKey ? o.a[prevKey] : o.conf_date;
+      if (!from) continue;
+      const d = dayDiff(validDate(from) || '', validDate(at) || '');
+      if (Number.isFinite(d) && d >= 0 && d < 400) durs.push(d);
+    }
+    if (!durs.length) continue;
+    durs.sort((a, b) => a - b);
+    const avg = durs.reduce((x, y) => x + y, 0) / durs.length;
+    cycle.push({
+      key,
+      label: meta.actual,
+      dept: meta.dept,
+      samples: durs.length,
+      avg: Math.round(avg * 10) / 10,
+      worst: durs[durs.length - 1],
+      target: key === 'des' ? s.dur.des : key === 'apr' ? s.dur.apr : key === 'ps' ? s.dur.pro : 0,
+    });
+  }
+
+  // ---- where the work is sitting, per department ----
+  const depts = [...new Set(orders.map((o) => o.live.dept).filter(Boolean))];
+  const load = depts
+    .map((dept) => {
+      const open = orders.filter((o) => o.live.dept === dept && o.live.rag !== 'CLOSED' && o.status === 'open');
+      const late = open.filter((o) => o.live.daysOverdue > 0);
+      return {
+        dept,
+        open: open.length,
+        late: late.length,
+        mt: Math.round(open.reduce((x, o) => x + (Number(o.mt) || 0), 0) * 10) / 10,
+        oldest: open.reduce((m, o) => Math.max(m, o.live.daysOverdue || 0), 0),
+      };
+    })
+    .sort((a, b) => b.open - a.open);
+
+  // ---- delivery performance: did we make the customer's date? ----
+  const decided = closed.filter((o) => o.due_date && (o.a.dsp || o.approved_at));
+  const onTime = decided.filter((o) => {
+    const done = validDate(String(o.a.dsp || o.approved_at).slice(0, 10));
+    return done && done <= (validDate(o.due_date) || '9999-12-31');
+  }).length;
+  const otif = decided.length ? Math.round((onTime / decided.length) * 100) : null;
+
+  const leadSamples = decided
+    .map((o) => (o.conf_date && o.a.dsp ? dayDiff(validDate(o.conf_date) || '', validDate(o.a.dsp) || '') : NaN))
+    .filter((d) => Number.isFinite(d) && d >= 0);
+  const leadTime = leadSamples.length
+    ? Math.round((leadSamples.reduce((x, y) => x + y, 0) / leadSamples.length) * 10) / 10
+    : null;
+
+  return {
+    months: bucket,
+    cycle,
+    load,
+    delivery: {
+      otif,
+      decided: decided.length,
+      onTime,
+      leadTime,
+      // A simple forecast: open MT divided by the last three months' average
+      // throughput, in months. Null when there is nothing to divide by.
+      monthsOfBook: (() => {
+        const openMt = orders
+          .filter((o) => o.status === 'open' && o.live.rag !== 'CLOSED')
+          .reduce((x, o) => x + (Number(o.mt) || 0), 0);
+        const recent = bucket.slice(-3);
+        const avgMt = recent.reduce((x, b) => x + b.mt, 0) / Math.max(1, recent.length);
+        return avgMt > 0 ? Math.round((openMt / avgMt) * 10) / 10 : null;
+      })(),
+    },
+  };
+}
+
 export function dashboard(orders: EnrichedOrder[], weeks = 16, settings: Settings) {
   const active = orders.filter((o) => o.live.rag !== 'CLOSED' && o.status === 'open');
   const closed = orders.filter((o) => o.live.rag === 'CLOSED' || o.status === 'closed');

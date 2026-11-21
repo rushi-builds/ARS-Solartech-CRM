@@ -15,9 +15,11 @@ async function ensureSchemaOnce(db: D1Database): Promise<void> {
 }
 import {
   clearSessionCookie,
+  describeAgent,
   hashPassword,
   newSessionToken,
   passwordProblem,
+  passwordScore,
   readSessionToken,
   sameOrigin,
   sessionCookie,
@@ -69,7 +71,28 @@ import {
   assignStage,
   deleteDeptPerson,
   listDeptPeople,
+  listCustomers,
+  getCustomer,
+  saveCustomer,
+  deleteCustomer,
+  missingCustomers,
+  listOrderNotes,
+  addOrderNote,
+  deleteOrderNote,
+  listOrderTags,
+  setOrderTags,
+  listAllTags,
+  analytics,
+  listAttachments,
+  countAttachments,
+  saveAttachment,
+  getAttachment,
+  deleteAttachment,
+  listSavedViews,
+  createSavedView,
+  deleteSavedView,
   listEvents,
+  listEventEntities,
   listNotifications,
   listOrderRows,
   listStageRows,
@@ -78,6 +101,11 @@ import {
   listUsers,
   getUser,
   logEvent,
+  listUserSessions,
+  listAllSessions,
+  revokeSession,
+  revokeOtherSessions,
+  touchSession,
   queueNotification,
   saveDispatch,
   saveOrder,
@@ -108,6 +136,8 @@ export interface Env {
   AI_MODEL?: string;
   // Optional: the account that always stays owner (see db.rootAdminEmail).
   ROOT_ADMIN_EMAIL?: string;
+  // Optional: bind a bucket and attachments are stored there instead of D1.
+  FILES?: R2Bucket;
 }
 
 type Ctx = { Bindings: Env; Variables: { user: User; caps: Record<string, boolean> } };
@@ -178,9 +208,21 @@ app.get('/healthz', async (c) => {
 });
 
 // ---------------------------------------------------------------- auth (public)
+/** The caller's address, best effort: Cloudflare sets CF-Connecting-IP. */
+function clientIp(c: any): string | null {
+  return (
+    c.req.header('cf-connecting-ip') ||
+    (c.req.header('x-forwarded-for') || '').split(',')[0].trim() ||
+    null
+  );
+}
+
 async function startSession(c: any, user: User) {
   const { token, tokenHash } = await newSessionToken();
-  await createSession(c.env.DB, user.sub, tokenHash, sessionExpiry());
+  await createSession(c.env.DB, user.sub, tokenHash, sessionExpiry(), {
+    userAgent: c.req.header('user-agent') || null,
+    ip: clientIp(c),
+  });
   c.header('Set-Cookie', sessionCookie(token, siteOrigin(c)));
 }
 
@@ -328,6 +370,9 @@ app.use('/api/*', async (c, next) => {
     return c.json({ error: 'signin_required', message: 'Sign in required', needsSetup: await noUsersYet(c.env.DB) }, 401);
   }
   c.set('user', user);
+  c.set('sessionHash', await sha256(token as string));
+  // "Last active" on the devices screen, written at most once an hour per row.
+  await touchSession(c.env.DB, await sha256(token as string), new Date().toISOString());
   // Permissions come from the matrix an admin edits in Settings, resolved once
   // per request so every guard below sees the same answer.
   const settings = await getSettings(c.env.DB);
@@ -375,6 +420,8 @@ function guard(c: any, action: Action) {
   }
   return null;
 }
+
+const nowISO = (): string => new Date().toISOString();
 
 const str = (v: unknown, max = 500): string | null => {
   if (v === null || v === undefined) return null;
@@ -606,7 +653,7 @@ async function revisionToken(db: D1Database): Promise<string> {
       return null;
     }
   };
-  const [settings, orders, stages, dispatches, users, people, requests, notifications, events] = await Promise.all([
+  const [settings, orders, stages, dispatches, users, people, requests, notifications, events, notes, tags] = await Promise.all([
     q('SELECT updated_at FROM settings WHERE id = 1'),
     q('SELECT COUNT(*) AS n, MAX(updated_at) AS at FROM orders'),
     q('SELECT COUNT(*) AS n, MAX(updated_at) AS at FROM order_stages'),
@@ -618,6 +665,8 @@ async function revisionToken(db: D1Database): Promise<string> {
     // no event row is written for some of them, so the outbox is its own line.
     q('SELECT COUNT(*) AS n, MAX(at) AS at FROM notifications'),
     q('SELECT COUNT(*) AS n, MAX(id) AS at FROM events'),
+    q('SELECT COUNT(*) AS n, MAX(created_at) AS at FROM order_notes'),
+    q('SELECT COUNT(*) AS n, MAX(added_at) AS at FROM order_tags'),
   ]);
   return [
     settings?.updated_at || '',
@@ -629,6 +678,10 @@ async function revisionToken(db: D1Database): Promise<string> {
     requests?.n ?? 0, requests?.at || '',
     notifications?.n ?? 0, notifications?.at || '',
     events?.n ?? 0, events?.at || '',
+    // Comments and tags are conversation, not bookkeeping — but they still
+    // change what the screen should show, so they belong in the token.
+    notes?.n ?? 0, notes?.at || '',
+    tags?.n ?? 0, tags?.at || '',
   ].join('|');
 }
 
@@ -648,6 +701,7 @@ async function snapshot(c: any) {
   ]);
   const roster = await deptRoster(db);
   const heads = headsFrom(roster);
+  const tags = await listOrderTags(db);
   const today = todayISO();
   const enriched = enrich(orders, stages, dispatches, settings, heads, today);
   const dash = dashboard(enriched, 16, settings);
@@ -662,7 +716,8 @@ async function snapshot(c: any) {
     me: user,
     capabilities: caps,
     settings,
-    orders: enriched,
+    orders: enriched.map((o) => ({ ...o, tags: tags[o.id] || [] })),
+    tags: await listAllTags(db),
     dispatches,
     stakeholders,
     deptPeople: roster,
@@ -1146,13 +1201,25 @@ app.patch('/api/users/:sub', async (c) => {
     return c.json({ error: 'self_disable', message: 'You cannot disable your own account' }, 400);
   }
 
-  await updateUser(c.env.DB, sub, { role, dept, active, phone, deptAdmin });
-  if (typeof body.password === 'string' && body.password) {
-    const problem = passwordProblem(body.password);
+  // Validate the password *before* writing anything: a rejected password used
+  // to leave the role/department change behind, so a 400 still changed the user.
+  const newPassword = typeof body.password === 'string' && body.password ? body.password : null;
+  if (newPassword) {
+    const problem = passwordProblem(newPassword);
     if (problem) return c.json({ error: 'weak_password', message: problem }, 400);
-    await setPassword(c.env.DB, sub, await hashPassword(body.password));
+  }
+
+  await updateUser(c.env.DB, sub, { role, dept, active, phone, deptAdmin });
+  if (newPassword) {
+    await setPassword(c.env.DB, sub, await hashPassword(newPassword));
+    // A password reset must actually lock the old holder out. Keep the caller's
+    // own session when they reset themselves, drop everything else.
+    const keepSelf = me.sub === sub ? String(c.get('sessionHash') || '') : '';
+    const n = keepSelf
+      ? await revokeOtherSessions(c.env.DB, sub, keepSelf)
+      : await revokeOtherSessions(c.env.DB, sub, '');
     await logEvent(c.env.DB, { sub: me.sub, name: me.name }, 'user', sub, 'password',
-      `Password reset for ${target.name || target.email || sub}`);
+      `Password reset for ${target.name || target.email || sub}${n ? `, ${n} session(s) signed out` : ''}`);
   }
   await logEvent(c.env.DB, { sub: me.sub, name: me.name }, 'user', sub, 'update',
     `${target.name || target.email || sub}: role=${role ?? target.role}, dept=${dept ?? '-'}, active=${active ?? target.active}${deptAdmin !== undefined ? ', dept admin=' + (deptAdmin ? 'yes' : 'no') : ''}`);
@@ -1245,14 +1312,29 @@ app.post('/api/import', async (c) => {
   const body = await jsonBody(c);
   const rows = Array.isArray(body.rows) ? body.rows.slice(0, 500) : [];
   const u: User = c.get('user');
+  const dryRun = body.dryRun === true;
   let created = 0;
   const skipped: string[] = [];
-  for (const r of rows) {
+  const problems: { row: number; text: string; reason: string }[] = [];
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i] || {};
     const customer = str(r.customer, 200);
+    const label = String(r.customer || r.project || r.id || `row ${i + 1}`).slice(0, 80);
     if (!customer) {
-      skipped.push(String(r.project || r.id || 'row without customer'));
+      skipped.push(label);
+      problems.push({ row: i + 1, text: label, reason: 'No customer name' });
       continue;
     }
+    // Dates are the usual culprit in a sheet export: Excel gives serial numbers
+    // and dd/mm/yyyy strings. Anything unreadable is imported as "no date" and
+    // reported, rather than silently dropped or crashing the plan later.
+    for (const k of ['po_date', 'conf_date', 'due_date']) {
+      if (r[k] && !validDate(r[k])) problems.push({ row: i + 1, text: label, reason: `${k} "${String(r[k]).slice(0, 24)}" is not a date` });
+    }
+    if (r.mt !== undefined && r.mt !== '' && !Number.isFinite(Number(r.mt))) {
+      problems.push({ row: i + 1, text: label, reason: `mt "${String(r.mt).slice(0, 24)}" is not a number` });
+    }
+    if (dryRun) continue;
     try {
       const id = await nextId(c.env.DB, fyPrefix(), 'orders');
       await saveOrder(
@@ -1283,8 +1365,19 @@ app.post('/api/import', async (c) => {
       skipped.push(`${customer} (save failed)`);
     }
   }
-  await logEvent(c.env.DB, { sub: u.sub, name: u.name }, 'order', null, 'import', `${created} orders imported`);
-  return c.json({ ok: true, created, skipped, snapshot: await snapshot(c) });
+  const summary = dryRun
+    ? `${rows.length} rows checked, ${problems.length} problem(s)`
+    : `${created} orders imported, ${skipped.length} skipped`;
+  await logEvent(c.env.DB, { sub: u.sub, name: u.name }, 'order', null, dryRun ? 'import_check' : 'import', summary);
+  return c.json({
+    ok: true,
+    dryRun,
+    checked: rows.length,
+    created,
+    skipped,
+    problems: problems.slice(0, 100),
+    snapshot: dryRun ? undefined : await snapshot(c),
+  });
 });
 
 // ---------------------------------------------------------------- escalations + alerts
@@ -1420,9 +1513,447 @@ app.post('/api/ai/chat', async (c) => {
 });
 
 // ---------------------------------------------------------------- activity
+// ---------------------------------------------------------------- sessions
+app.get('/api/sessions', async (c) => {
+  const me: User = c.get('user');
+  const caps = c.get('caps') as Record<string, boolean>;
+  const rows = caps.users ? await listAllSessions(c.env.DB) : await listUserSessions(c.env.DB, me.sub);
+  const current = String(c.get('sessionHash') || '');
+  return c.json({
+    sessions: rows.map((r) => ({
+      id: r.id,
+      device: describeAgent(r.user_agent),
+      ip: r.ip,
+      created_at: r.created_at,
+      last_seen: r.last_seen,
+      expires_at: r.expires_at,
+      current: current.startsWith(r.id),
+      user: caps.users && r.email ? { email: r.email, name: r.name } : undefined,
+    })),
+    scope: caps.users ? 'all' : 'own',
+  });
+});
+
+app.post('/api/sessions/revoke', async (c) => {
+  const me: User = c.get('user');
+  const caps = c.get('caps') as Record<string, boolean>;
+  const body = await jsonBody(c);
+  const id = String(body.id || '');
+  if (!id) return c.json({ error: 'bad_request', message: 'Which session?' }, 400);
+  if (!caps.users && !(await listUserSessions(c.env.DB, me.sub)).some((r) => r.id.startsWith(id))) {
+    return c.json({ error: 'forbidden', message: 'That session is not yours' }, 403);
+  }
+  const n = await revokeSession(c.env.DB, id, caps.users ? undefined : me.sub);
+  await logEvent(c.env.DB, { sub: me.sub, name: me.name }, 'session', id, 'revoke',
+    `${me.name || me.email} signed out a device`);
+  return c.json({ ok: true, revoked: n });
+});
+
+app.post('/api/sessions/revoke-others', async (c) => {
+  const me: User = c.get('user');
+  const keep = String(c.get('sessionHash') || '');
+  const n = await revokeOtherSessions(c.env.DB, me.sub, keep);
+  await logEvent(c.env.DB, { sub: me.sub, name: me.name }, 'session', me.sub, 'revoke_others',
+    `${me.name || me.email} signed out of ${n} other device${n === 1 ? '' : 's'}`);
+  return c.json({ ok: true, revoked: n });
+});
+
+// ---------------------------------------------------------------- activity
 app.get('/api/activity', async (c) => {
   const limit = Math.min(500, Math.max(1, Number(c.req.query('limit')) || 200));
-  return c.json({ activity: await listEvents(c.env.DB, limit) });
+  // The audit trail is the first place anyone looks after a mistake, so it can
+  // be narrowed to one entity, one person, or a phrase — and paged backwards.
+  const events = await listEvents(c.env.DB, {
+    limit,
+    entity: c.req.query('entity') || undefined,
+    actor: c.req.query('actor') || undefined,
+    q: c.req.query('q') || undefined,
+    before: Number(c.req.query('before')) || undefined,
+  });
+  return c.json({
+    activity: events,
+    entities: await listEventEntities(c.env.DB),
+    nextBefore: events.length ? (events[events.length - 1] as any).id : null,
+  });
+});
+
+
+// ---------------------------------------------------------------- analytics
+app.get('/api/analytics', async (c) => {
+  // Computed from the same snapshot data everyone else sees, so the numbers can
+  // never disagree with the order list on the next tab.
+  const db = c.env.DB;
+  const [orders, stages, dispatches, settings] = await Promise.all([
+    listOrderRows(db), listStageRows(db), listDispatchRows(db), getSettings(db),
+  ]);
+  const roster = await deptRoster(db);
+  const enriched = enrich(orders, stages, dispatches, settings, headsFrom(roster), todayISO());
+  return c.json({ analytics: analytics(enriched, settings) });
+});
+
+
+// ---------------------------------------------------------------- attachments
+const MAX_FILE = 8 * 1024 * 1024;          // 8 MB per file
+const D1_FILE_LIMIT = 1024 * 1024;         // 1 MB when there is no bucket
+
+function safeName(name: string): string {
+  return String(name || 'file')
+    .replace(/[\u0000-\u001f<>:"/\\|?*]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 120) || 'file';
+}
+
+/** Attachments for one order or one customer, without the blobs. */
+app.get('/api/attachments', async (c) => {
+  const orderId = c.req.query('order');
+  const customerId = c.req.query('customer');
+  if (!orderId && !customerId) return c.json({ error: 'bad_request', message: 'Which order or customer?' }, 400);
+  return c.json({
+    attachments: await listAttachments(c.env.DB, orderId ? { orderId } : { customerId }),
+    storage: c.env.FILES ? 'r2' : 'd1',
+    maxBytes: c.env.FILES ? MAX_FILE : D1_FILE_LIMIT,
+  });
+});
+
+/**
+ * Upload is multipart/form-data, because that is what a file input sends and
+ * because JSON/base64 would inflate every PDF by a third.
+ */
+app.post('/api/attachments', async (c) => {
+  const u: User = c.get('user');
+  const form = await c.req.formData().catch(() => null);
+  if (!form) return c.json({ error: 'bad_request', message: 'Expected a file upload' }, 400);
+
+  const file = form.get('file');
+  if (!file || typeof file === 'string') return c.json({ error: 'bad_request', message: 'No file was sent' }, 400);
+
+  const orderId = String(form.get('order_id') || '') || null;
+  const customerId = String(form.get('customer_id') || '') || null;
+  if (!orderId && !customerId) return c.json({ error: 'bad_request', message: 'Which order or customer?' }, 400);
+
+  const size = (file as File).size || 0;
+  const limit = c.env.FILES ? MAX_FILE : D1_FILE_LIMIT;
+  if (size > limit) {
+    return c.json(
+      {
+        error: 'too_large',
+        message: `Files up to ${Math.round(limit / 1048576)} MB are allowed${c.env.FILES ? '' : ' without a bucket bound'}`,
+      },
+      413,
+    );
+  }
+
+  const filename = safeName((file as File).name);
+  const mime = (file as File).type || 'application/octet-stream';
+  const id = crypto.randomUUID();
+  const kind = String(form.get('kind') || 'file').slice(0, 24);
+  const note = String(form.get('note') || '').trim().slice(0, 300) || null;
+
+  let storage = 'd1';
+  let r2Key: string | null = null;
+  let data: string | null = null;
+
+  if (c.env.FILES) {
+    r2Key = `attachments/${id}/${filename}`;
+    await c.env.FILES.put(r2Key, await (file as File).arrayBuffer(), {
+      httpMetadata: { contentType: mime },
+      customMetadata: { order: orderId || '', customer: customerId || '', by: u.sub },
+    });
+    storage = 'r2';
+  } else {
+    // Base64 in D1, deliberately small: enough for a PO PDF or a drawing photo.
+    const buf = await (file as File).arrayBuffer();
+    const bytes = new Uint8Array(buf);
+    let bin = '';
+    for (let i = 0; i < bytes.length; i += 0x8000) {
+      bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+    }
+    data = btoa(bin);
+  }
+
+  await saveAttachment(c.env.DB, {
+    id, orderId, customerId, filename, mime, size, kind, storage, r2Key, data, note,
+    by: u.sub, byName: u.name || u.email || '',
+  });
+  await logEvent(c.env.DB, { sub: u.sub, name: u.name }, 'attachment', orderId || customerId, 'upload',
+    `${filename} attached${orderId ? ' to ' + orderId : ''}`);
+  return c.json({
+    ok: true,
+    id,
+    attachments: await listAttachments(c.env.DB, orderId ? { orderId } : { customerId }),
+    snapshot: await snapshot(c),
+  });
+});
+
+/** Download: streams the blob back with the original filename. */
+app.get('/api/attachments/:id/file', async (c) => {
+  const row = await getAttachment(c.env.DB, c.req.param('id'));
+  if (!row) return c.json({ error: 'not_found' }, 404);
+  const headers = new Headers();
+  headers.set('Content-Type', row.mime || 'application/octet-stream');
+  headers.set('Content-Disposition', `attachment; filename="${encodeURIComponent(row.filename)}"`);
+  headers.set('Cache-Control', 'private, max-age=3600');
+  if (row.storage === 'r2' && row.r2_key && c.env.FILES) {
+    const obj = await c.env.FILES.get(row.r2_key);
+    if (!obj) return c.json({ error: 'not_found', message: 'The stored file is missing' }, 404);
+    return new Response(obj.body, { headers });
+  }
+  if (!row.data) return c.json({ error: 'not_found', message: 'The stored file is missing' }, 404);
+  const bin = atob(row.data);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new Response(bytes, { headers });
+});
+
+app.delete('/api/attachments/:id', async (c) => {
+  const u: User = c.get('user');
+  const caps = c.get('caps') as Record<string, boolean>;
+  const row = await getAttachment(c.env.DB, c.req.param('id'));
+  if (!row) return c.json({ error: 'not_found' }, 404);
+  if (row.uploaded_by !== u.sub && !caps.delete) {
+    return c.json({ error: 'forbidden', message: 'Only the uploader or an admin can remove a file' }, 403);
+  }
+  if (row.storage === 'r2' && row.r2_key && c.env.FILES) {
+    try { await c.env.FILES.delete(row.r2_key); } catch { /* the row still goes */ }
+  }
+  await deleteAttachment(c.env.DB, row.id);
+  await logEvent(c.env.DB, { sub: u.sub, name: u.name }, 'attachment', row.order_id || row.customer_id, 'delete',
+    `${row.filename} removed`);
+  return c.json({
+    ok: true,
+    attachments: await listAttachments(c.env.DB, row.order_id ? { orderId: row.order_id } : { customerId: row.customer_id || '' }),
+    snapshot: await snapshot(c),
+  });
+});
+
+// ---------------------------------------------------------------- saved views (server)
+app.get('/api/views', async (c) => {
+  const me: User = c.get('user');
+  const rows = await listSavedViews(c.env.DB, me.sub);
+  return c.json({
+    views: rows.map((v) => ({ id: v.id, name: v.name, scope: v.scope, filters: JSON.parse(v.filters || '{}') })),
+  });
+});
+
+app.post('/api/views', async (c) => {
+  const me: User = c.get('user');
+  const body = await jsonBody(c);
+  const name = str(body.name, 40);
+  if (!name) return c.json({ error: 'bad_request', message: 'Give the view a name' }, 400);
+  const filters = JSON.stringify(body.filters || {});
+  const id = 'v' + crypto.randomUUID().slice(0, 8);
+  await createSavedView(c.env.DB, { id, sub: me.sub, name, scope: str(body.scope, 20) || 'orders', filters });
+  return c.json({ ok: true, id, views: (await listSavedViews(c.env.DB, me.sub)).map((v) => ({ id: v.id, name: v.name, scope: v.scope, filters: JSON.parse(v.filters || '{}') })) });
+});
+
+app.delete('/api/views/:id', async (c) => {
+  const me: User = c.get('user');
+  await deleteSavedView(c.env.DB, c.req.param('id'), me.sub);
+  return c.json({ ok: true, views: (await listSavedViews(c.env.DB, me.sub)).map((v) => ({ id: v.id, name: v.name, scope: v.scope, filters: JSON.parse(v.filters || '{}') })) });
+});
+
+// ---------------------------------------------------------------- customers
+app.get('/api/customers', async (c) => {
+  const denied = guard(c, 'order');
+  if (denied) return denied;
+  return c.json({
+    customers: await listCustomers(c.env.DB),
+    missing: await missingCustomers(c.env.DB),
+  });
+});
+
+app.post('/api/customers', async (c) => {
+  const denied = guard(c, 'order');
+  if (denied) return denied;
+  const body = await jsonBody(c);
+  const name = str(body.name, 160);
+  if (!name) return c.json({ error: 'bad_request', message: 'A customer needs a name' }, 400);
+  const dup = await c.env.DB
+    .prepare('SELECT id FROM customers WHERE TRIM(LOWER(name)) = TRIM(LOWER(?))')
+    .bind(name)
+    .first<{ id: string }>();
+  if (dup) return c.json({ error: 'duplicate', message: `${name} is already in the customer master` }, 409);
+  const id = 'CUS-' + String(Date.now()).slice(-8);
+  const u: User = c.get('user');
+  await saveCustomer(c.env.DB, id, { ...body, name }, true);
+  await logEvent(c.env.DB, { sub: u.sub, name: u.name }, 'customer', id, 'create', `${name} added to the customer master`);
+  return c.json({ ok: true, id, customers: await listCustomers(c.env.DB), missing: await missingCustomers(c.env.DB), snapshot: await snapshot(c) });
+});
+
+app.patch('/api/customers/:id', async (c) => {
+  const denied = guard(c, 'order');
+  if (denied) return denied;
+  const id = c.req.param('id');
+  const existing = await getCustomer(c.env.DB, id);
+  if (!existing) return c.json({ error: 'not_found' }, 404);
+  const body = await jsonBody(c);
+  const u: User = c.get('user');
+  await saveCustomer(c.env.DB, id, body, false);
+  await logEvent(c.env.DB, { sub: u.sub, name: u.name }, 'customer', id, 'update', `${existing.name} updated`);
+  return c.json({ ok: true, customer: await getCustomer(c.env.DB, id), customers: await listCustomers(c.env.DB), snapshot: await snapshot(c) });
+});
+
+app.delete('/api/customers/:id', async (c) => {
+  const denied = guard(c, 'delete');
+  if (denied) return denied;
+  const id = c.req.param('id');
+  const existing = await getCustomer(c.env.DB, id);
+  if (!existing) return c.json({ error: 'not_found' }, 404);
+  // Orders keep their own customer name, so deleting the master entry is safe:
+  // it never deletes the order book with it.
+  const { n } = (await c.env.DB
+    .prepare('SELECT COUNT(*) AS n FROM orders WHERE TRIM(LOWER(customer)) = TRIM(LOWER(?))')
+    .bind(existing.name)
+    .first<{ n: number }>()) || { n: 0 };
+  if (n > 0) {
+    return c.json(
+      { error: 'has_orders', message: `${existing.name} has ${n} order(s). Deactivate the customer instead of deleting.` },
+      409,
+    );
+  }
+  const u: User = c.get('user');
+  await deleteCustomer(c.env.DB, id);
+  await logEvent(c.env.DB, { sub: u.sub, name: u.name }, 'customer', id, 'delete', `${existing.name} removed`);
+  return c.json({ ok: true, customers: await listCustomers(c.env.DB), missing: await missingCustomers(c.env.DB), snapshot: await snapshot(c) });
+});
+
+/** One click: add every customer name that exists in the order book to the master. */
+app.post('/api/customers/backfill', async (c) => {
+  const denied = guard(c, 'order');
+  if (denied) return denied;
+  const u: User = c.get('user');
+  const missing = await missingCustomers(c.env.DB);
+  let added = 0;
+  for (const m of missing.slice(0, 300)) {
+    if (!m.name) continue;
+    const id = 'CUS-' + Math.random().toString(36).slice(2, 10).toUpperCase();
+    try {
+      await saveCustomer(c.env.DB, id, { name: m.name }, true);
+      added++;
+    } catch {
+      /* a name that appeared twice meanwhile: skip it */
+    }
+  }
+  await logEvent(c.env.DB, { sub: u.sub, name: u.name }, 'customer', null, 'backfill', `${added} customers added from the order book`);
+  return c.json({ ok: true, added, customers: await listCustomers(c.env.DB), missing: await missingCustomers(c.env.DB), snapshot: await snapshot(c) });
+});
+
+// ---------------------------------------------------------------- order notes
+app.get('/api/orders/:id/notes', async (c) => {
+  const id = c.req.param('id');
+  return c.json({ notes: await listOrderNotes(c.env.DB, id) });
+});
+
+app.post('/api/orders/:id/notes', async (c) => {
+  const id = c.req.param('id');
+  const order = await c.env.DB.prepare('SELECT id, customer FROM orders WHERE id = ?').bind(id).first<any>();
+  if (!order) return c.json({ error: 'not_found' }, 404);
+  const body = await jsonBody(c);
+  const text = str(body.body, 4000);
+  if (!text) return c.json({ error: 'bad_request', message: 'Write something first' }, 400);
+  const u: User = c.get('user');
+  const noteId = await addOrderNote(c.env.DB, {
+    orderId: id,
+    body: text,
+    kind: body.kind === 'update' ? 'update' : 'note',
+    authorSub: u.sub,
+    authorName: u.name || u.email || 'Someone',
+  });
+  await logEvent(c.env.DB, { sub: u.sub, name: u.name }, 'order', id, 'note', `Note added to ${order.customer || id}`);
+  return c.json({ ok: true, id: noteId, notes: await listOrderNotes(c.env.DB, id), snapshot: await snapshot(c) });
+});
+
+app.delete('/api/orders/:id/notes/:noteId', async (c) => {
+  const id = c.req.param('id');
+  const noteId = c.req.param('noteId');
+  const u: User = c.get('user');
+  const caps = c.get('caps') as Record<string, boolean>;
+  const note = await c.env.DB
+    .prepare('SELECT author_sub FROM order_notes WHERE id = ? AND order_id = ?')
+    .bind(noteId, id)
+    .first<{ author_sub: string | null }>();
+  if (!note) return c.json({ error: 'not_found' }, 404);
+  if (note.author_sub !== u.sub && !caps.delete) {
+    return c.json({ error: 'forbidden', message: 'Only the author or an admin can delete this note' }, 403);
+  }
+  await deleteOrderNote(c.env.DB, noteId, id);
+  return c.json({ ok: true, notes: await listOrderNotes(c.env.DB, id) });
+});
+
+// ---------------------------------------------------------------- order tags
+app.put('/api/orders/:id/tags', async (c) => {
+  const id = c.req.param('id');
+  const order = await c.env.DB.prepare('SELECT id FROM orders WHERE id = ?').bind(id).first();
+  if (!order) return c.json({ error: 'not_found' }, 404);
+  const body = await jsonBody(c);
+  const tags = Array.isArray(body.tags) ? body.tags : [];
+  const u: User = c.get('user');
+  const clean = await setOrderTags(c.env.DB, id, tags, u.sub);
+  return c.json({ ok: true, tags: clean, snapshot: await snapshot(c) });
+});
+
+// ---------------------------------------------------------------- bulk actions
+app.post('/api/orders/bulk', async (c) => {
+  const body = await jsonBody(c);
+  const ids = Array.isArray(body.ids) ? body.ids.map(String).slice(0, 200) : [];
+  const action = String(body.action || '');
+  if (!ids.length) return c.json({ error: 'bad_request', message: 'Pick at least one order' }, 400);
+  const u: User = c.get('user');
+  const caps = c.get('caps') as Record<string, boolean>;
+  const marks = ids.map(() => '?').join(', ');
+  let changed = 0;
+
+  if (action === 'status') {
+    const denied = guard(c, 'order');
+    if (denied) return denied;
+    const status = String(body.value || '');
+    if (!['open', 'closed', 'cancelled'].includes(status)) return c.json({ error: 'bad_value' }, 400);
+    const res = await c.env.DB
+      .prepare(`UPDATE orders SET status = ?, updated_at = ?, updated_by = ? WHERE id IN (${marks})`)
+      .bind(status, nowISO(), u.sub, ...ids)
+      .run();
+    changed = Number((res as any)?.meta?.changes ?? 0);
+  } else if (action === 'priority') {
+    const denied = guard(c, 'order');
+    if (denied) return denied;
+    const priority = str(body.value, 20) || 'Medium';
+    if (!['Low', 'Medium', 'High', 'Urgent'].includes(priority)) return c.json({ error: 'bad_value' }, 400);
+    const res = await c.env.DB
+      .prepare(`UPDATE orders SET priority = ?, updated_at = ?, updated_by = ? WHERE id IN (${marks})`)
+      .bind(priority, nowISO(), u.sub, ...ids)
+      .run();
+    changed = Number((res as any)?.meta?.changes ?? 0);
+  } else if (action === 'tag') {
+    const tag = String(body.value || '').trim().toLowerCase().slice(0, 24);
+    if (!tag) return c.json({ error: 'bad_value' }, 400);
+    for (const id of ids) {
+      await c.env.DB
+        .prepare('INSERT OR IGNORE INTO order_tags (order_id, tag, added_by, added_at) VALUES (?, ?, ?, ?)')
+        .bind(id, tag, u.sub, nowISO())
+        .run();
+      changed++;
+    }
+  } else if (action === 'untag') {
+    const tag = String(body.value || '').trim().toLowerCase();
+    const res = await c.env.DB
+      .prepare(`DELETE FROM order_tags WHERE tag = ? AND order_id IN (${marks})`)
+      .bind(tag, ...ids)
+      .run();
+    changed = Number((res as any)?.meta?.changes ?? 0);
+  } else if (action === 'delete') {
+    if (!caps.delete) return c.json({ error: 'forbidden', message: 'You cannot delete orders' }, 403);
+    for (const id of ids) {
+      await deleteOrder(c.env.DB, id);
+      changed++;
+    }
+  } else {
+    return c.json({ error: 'bad_action' }, 400);
+  }
+
+  await logEvent(c.env.DB, { sub: u.sub, name: u.name }, 'order', null, 'bulk',
+    `${changed} order(s): ${action}${body.value ? ' = ' + String(body.value).slice(0, 30) : ''}`);
+  return c.json({ ok: true, changed, snapshot: await snapshot(c) });
 });
 
 // ---------------------------------------------------------------- static SPA
@@ -1430,6 +1961,13 @@ app.get('/api/activity', async (c) => {
 // otherwise resolve, which silently skipped the headers middleware and the
 // "API 404 must be JSON" behaviour for anything that is not an /api route.
 app.notFound((c) => c.env.ASSETS.fetch(c.req.raw));
+// Last-resort handler: an unexpected exception becomes a JSON error with the
+// real reason, instead of an opaque "Internal Server Error" in the browser.
+app.onError((err, c) => {
+  console.error('UNCAUGHT', c.req.method, c.req.path, err && ((err as any).stack || err));
+  const message = String((err as any)?.message || err || 'Unexpected error');
+  return c.json({ error: 'internal', message }, 500);
+});
 
 export default {
   fetch(request: Request, env: Env): Promise<Response> {

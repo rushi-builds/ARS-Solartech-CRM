@@ -259,14 +259,34 @@ const ICONS = {
   users: '<circle cx="9" cy="8" r="3.2"/><path d="M3 20c0-3.3 2.7-5.5 6-5.5s6 2.2 6 5.5"/><path d="M17 5.2a3.2 3.2 0 0 1 0 6.1"/><path d="M18 14.6c2 .7 3 2.4 3 4.4"/>',
   gear: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>',
   clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/>',
+  shield: '<path d="M12 3l7 3v6c0 4.4-3 8-7 9-4-1-7-4.6-7-9V6z"/><path d="M9 12l2 2 4-4"/>',
+  monitor: '<rect x="2.5" y="4" width="19" height="12.5" rx="2"/><path d="M8 20.5h8"/><path d="M12 16.5v4"/>',
+  phone: '<rect x="7" y="2.5" width="10" height="19" rx="2.4"/><path d="M11 18.5h2"/>',
+  search: '<circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/>',
+  filter: '<path d="M3 5h18"/><path d="M6.5 12h11"/><path d="M10 19h4"/>',
+  download: '<path d="M12 3v12"/><path d="M7.5 10.5L12 15l4.5-4.5"/><path d="M4 20h16"/>',
+  building: '<rect x="4" y="3" width="16" height="18" rx="2"/><path d="M9 7h2M13 7h2M9 11h2M13 11h2M9 15h2M13 15h2"/><path d="M10 21v-3h4v3"/>',
+  tag: '<path d="M3 12V5a2 2 0 0 1 2-2h7l9 9-9 9z"/><circle cx="8" cy="8" r="1.4"/>',
+  note: '<path d="M20 4H8L4 8v12h16z"/><path d="M8 4v4H4"/><path d="M9 13h7M9 17h5"/>',
+  file: '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/>',
 };
 const icon = (name) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${ICONS[name] || ''}</svg>`;
 
 /* ── state ─────────────────────────────────────────────────── */
-const S = { d: null, view: 'dashboard', q: '', status: 'all', rag: 'all', stage: 'all', open: null };
+const S = {
+  d: null, view: 'dashboard', q: '', status: 'all', rag: 'all', stage: 'all', open: null,
+  // The audit trail is fetched on demand because it is searchable/paged, and
+  // the devices screen likewise: neither belongs in the 20s snapshot.
+  activity: { rows: null, entities: [], entity: 'all', q: '', loading: false },
+  sessions: { rows: null, scope: 'own', loading: false },
+  customers: { rows: null, missing: [], q: '', loading: false },
+  notes: { orderId: null, rows: null, loading: false },
+  // Bulk selection on the orders table.
+  picked: new Set(),
+  analytics: { data: null, loading: false },
+  files: { orderId: null, rows: null, loading: false, maxBytes: 1048576, storage: 'd1' },
+};
 
-/* The designated super admin account: always owner, never demotable. */
-const SUPER_ADMIN_EMAIL = 'rushidhumal.04@gmail.com';
 const FULL_ROLES = ['owner', 'admin', 'manager'];
 
 const VIEWS = {
@@ -277,6 +297,9 @@ const VIEWS = {
   users: { title: 'Users & roles', sub: 'Who can see what, and who can change it', icon: 'users' },
   settings: { title: 'Settings', sub: 'Advanced backend settings — planning, access control, alerts and teams', icon: 'gear' },
   activity: { title: 'Activity', sub: 'Every change, who made it and when', icon: 'clock' },
+  sessions: { title: 'Sessions & devices', sub: 'Where this workspace is signed in, and how to sign it out', icon: 'shield' },
+  customers: { title: 'Customers', sub: 'The customer master behind every order', icon: 'building' },
+  analytics: { title: 'Analytics', sub: 'Throughput, department cycle times and delivery performance', icon: 'chart' },
 };
 
 /* ── API ───────────────────────────────────────────────────── */
@@ -378,6 +401,7 @@ async function loadApp() {
 }
 
 function wireAuthForms() {
+  wirePwMeters(document);
   const loginForm = $('#loginForm');
   if (loginForm) {
     loginForm.addEventListener('submit', async (ev) => {
@@ -464,6 +488,9 @@ function render() {
     users: viewUsers,
     settings: viewSettings,
     activity: viewActivity,
+    sessions: viewSessions,
+    customers: viewCustomers,
+    analytics: viewAnalytics,
   })[S.view]();
   const viewEl = $('#view');
   viewEl.innerHTML = html;
@@ -592,11 +619,12 @@ function reqAsk(r) {
 
 function renderNav() {
   const items = [
-    { id: 'dashboard' }, { id: 'orders' }, { id: 'dispatch' }, { id: 'capacity' },
+    { id: 'dashboard' }, { id: 'orders' }, { id: 'dispatch' }, { id: 'customers' }, { id: 'capacity' }, { id: 'analytics' },
     { sep: 'Administration' },
     { id: 'users', hide: !cap('users') && !cap('settings') },
     { id: 'settings', hide: !cap('settings') && !cap('users') },
     { id: 'activity' },
+    { id: 'sessions' },
   ];
   $('#nav').innerHTML = items.map((it) => {
     if (it.sep) return `<div class="nav-sep">${esc(it.sep)}</div>`;
@@ -826,12 +854,30 @@ function viewOrders() {
         .map((s) => opt(String(s.no), s.no + ' · ' + s.name, S.stage)).join('')}
     </select>
     <span class="pill">${rows.length} shown</span>
+    ${S.picked.size ? `<div class="bulk-bar">
+      <b>${S.picked.size}</b> selected
+      <select id="bulkAction">
+        <option value="">Bulk action…</option>
+        <option value="status:open">Reopen</option>
+        <option value="status:closed">Mark closed</option>
+        <option value="status:cancelled">Mark cancelled</option>
+        <option value="priority:Urgent">Priority → Urgent</option>
+        <option value="priority:High">Priority → High</option>
+        <option value="tag:urgent">Tag → urgent</option>
+        <option value="tag:hold">Tag → hold</option>
+        ${cap('delete') ? '<option value="delete">Delete selected</option>' : ''}
+      </select>
+      <button class="btn ghost small" data-act="bulk-clear">Clear</button>
+    </div>` : ''}
     <span style="flex:1"></span>
+    <button class="btn ghost small" data-act="save-view" title="Save these filters">Save view</button>
+    <button class="btn ghost small" data-act="print" title="Print this list">Print</button>
     <button class="btn ghost small" data-act="import">Import</button>
     <button class="btn ghost small" data-act="export">Export</button>
     <button class="btn primary small" data-act="new-order" ${cap('order') ? '' : 'disabled'}>+ New order</button>
     </div>
 
+    ${viewChips()}
     <div class="card-head">
       <div class="lead">
         <span class="head-ico">${icon('box')}</span>
@@ -849,11 +895,12 @@ function viewOrders() {
     <div class="table-wrap">
       <table>
         <thead><tr>
+          <th class="pick"><input type="checkbox" id="pickAll" ${rows.length && rows.every((o) => S.picked.has(o.id)) ? 'checked' : ''} title="Select all shown" /></th>
           <th>Order</th><th>Customer / project</th><th class="num">MT</th><th>Confirmed</th><th>Due</th>
           <th>With whom</th><th>Forecast dispatch</th><th class="num">Buffer</th><th>Progress</th><th>Status</th>
         </tr></thead>
         <tbody>
-          ${rows.length ? rows.map(orderRow).join('') : `<tr><td colspan="10" class="empty">No orders match this filter.</td></tr>`}
+          ${rows.length ? rows.map(orderRow).join('') : `<tr><td colspan="11" class="empty">No orders match this filter.</td></tr>`}
         </tbody>
       </table>
     </div>
@@ -883,8 +930,11 @@ function stageDots(o) {
 
 function orderRow(o) {
   const pct = clampPct(o.live.progress);
-  return `<tr class="clickable" data-act="open-order" data-id="${esc(o.id)}">
-    <td><div class="cell-id"><span class="mono">${esc(o.id)}</span>${stageDots(o)}</div>${o.live.sopFlag ? '<small class="sub-line" style="color:#ffb47a">SOP flag</small>' : ''}</td>
+  return `<tr class="clickable ${S.picked.has(o.id) ? 'picked' : ''}" data-act="open-order" data-id="${esc(o.id)}">
+    <td class="pick"><input type="checkbox" data-pick="${esc(o.id)}" ${S.picked.has(o.id) ? 'checked' : ''} /></td>
+    <td><div class="cell-id"><span class="mono">${esc(o.id)}</span>${stageDots(o)}</div>
+      ${(o.tags || []).map((t) => `<span class="tag">${esc(t)}</span>`).join('')}
+      ${o.live.sopFlag ? '<small class="sub-line" style="color:#ffb47a">SOP flag</small>' : ''}</td>
     <td><span class="cust">${esc(o.customer || '—')}</span><small class="sub-line">${esc(o.project || '')}</small></td>
     <td class="num">${n1(o.mt)}<small class="sub-line" style="text-align:right">MT</small></td>
     <td>${fmt(o.conf_date)}</td>
@@ -895,6 +945,82 @@ function orderRow(o) {
     <td><span class="prog"><span class="bar blue"><i style="width:${pct}%"></i></span><b>${pct}%</b></span></td>
     <td>${ragBadge(o.live.rag)}${o.live.rag === 'CLOSED' && o.approval !== 'approved' ? '<small class="sub-line">approval pending</small>' : ''}</td>
   </tr>`;
+}
+
+
+/* ── attachments ─────────────────────────────────────────────── */
+function fmtBytes(n) {
+  const b = Number(n) || 0;
+  if (b < 1024) return b + ' B';
+  if (b < 1048576) return (b / 1024).toFixed(0) + ' KB';
+  return (b / 1048576).toFixed(1) + ' MB';
+}
+
+const FILE_ICON = (name, mime) => {
+  const n = String(name || '').toLowerCase();
+  const m = String(mime || '');
+  if (n.endsWith('.pdf') || m.includes('pdf')) return 'PDF';
+  if (/\.(png|jpe?g|gif|webp|heic)$/.test(n) || m.startsWith('image/')) return 'IMG';
+  if (/\.(xlsx?|csv)$/.test(n)) return 'XLS';
+  if (/\.(docx?)$/.test(n)) return 'DOC';
+  if (/\.(dwg|dxf)$/.test(n)) return 'DWG';
+  return 'FILE';
+};
+
+function attachmentsHtml(orderId) {
+  if (S.files.orderId !== orderId) {
+    if (!S.files.loading) loadAttachments(orderId);
+    return '<div class="empty" style="padding:12px">Loading files…</div>';
+  }
+  const rows = S.files.rows || [];
+  if (!rows.length) return '<div class="empty" style="padding:12px">No files yet. Attach the PO, a drawing or a site photo.</div>';
+  return `<div class="file-list">${rows.map((f) => `
+    <div class="file-row">
+      <span class="file-kind">${esc(FILE_ICON(f.filename, f.mime))}</span>
+      <div class="file-main">
+        <b>${esc(f.filename)}</b>
+        <small>${fmtBytes(f.size)} · ${esc(f.uploaded_name || 'Someone')} · ${esc(String(f.created_at).slice(0, 10))}</small>
+      </div>
+      <a class="btn ghost small" href="/api/attachments/${esc(f.id)}/file" download>Download</a>
+      <button class="icon-btn" data-act="del-file" data-id="${esc(f.id)}" data-order="${esc(orderId)}" title="Remove">×</button>
+    </div>`).join('')}</div>`;
+}
+
+async function loadAttachments(orderId) {
+  if (S.files.loading) return;
+  S.files.loading = true;
+  try {
+    const res = await api('/api/attachments?order=' + encodeURIComponent(orderId));
+    S.files.orderId = orderId;
+    S.files.rows = res.attachments || [];
+    S.files.maxBytes = res.maxBytes;
+    S.files.storage = res.storage;
+  } catch {
+    S.files.orderId = orderId;
+    S.files.rows = [];
+  } finally {
+    S.files.loading = false;
+  }
+  const host = document.querySelector(`[data-files="${orderId}"]`);
+  if (host) host.innerHTML = attachmentsHtml(orderId);
+}
+
+async function uploadFile(orderId, file, kind) {
+  const fd = new FormData();
+  fd.append('file', file);
+  fd.append('order_id', orderId);
+  if (kind) fd.append('kind', kind);
+  // No Content-Type header: the browser must set the multipart boundary.
+  const res = await fetch('/api/attachments', { method: 'POST', body: fd, credentials: 'same-origin' });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.message || 'Upload failed');
+  S.files.orderId = orderId;
+  S.files.rows = body.attachments || [];
+  S.files.loading = false;
+  const host = document.querySelector(`[data-files="${orderId}"]`);
+  if (host) host.innerHTML = attachmentsHtml(orderId);
+  if (body.snapshot) apply(body.snapshot);
+  return body;
 }
 
 /* ── order drawer ──────────────────────────────────────────── */
@@ -922,6 +1048,33 @@ function openDrawer(id, silent) {
       ${ragBadge(o.live.rag)}
       <span class="badge grey">${esc(o.live.stage)}</span>
       ${o.live.sopFlag ? `<span class="badge amber">${esc(o.live.sopFlag)}</span>` : ''}
+      ${(o.tags || []).map((t) => `<span class="tag" data-act="untag-order" data-id="${esc(o.id)}" data-tag="${esc(t)}" title="Remove tag">${esc(t)}</span>`).join('')}
+      <button class="btn ghost small" data-act="tag-order" data-id="${esc(o.id)}">${icon('tag')}<span>Tag</span></button>
+    </div>
+
+    <div class="card tight" style="margin-bottom:14px">
+      <div class="card-head" style="margin-bottom:10px">
+        <div class="lead"><span class="head-ico grey">${icon('note')}</span>
+          <div><p class="h-eyebrow">Conversation</p><h3>Notes &amp; updates</h3></div></div>
+        <span class="hint" data-notes-count="${esc(o.id)}">${S.notes.orderId === o.id && S.notes.rows ? S.notes.rows.length : ''}</span>
+      </div>
+      <div class="note-compose">
+        <textarea data-note-input="${esc(o.id)}" rows="2" placeholder="Add a note for the team — a phone call, a delay reason, a decision…"></textarea>
+        <button class="btn primary small" data-act="add-note" data-id="${esc(o.id)}">Post</button>
+      </div>
+      <div data-notes="${esc(o.id)}">${notesHtml(o.id)}</div>
+    </div>
+
+    <div class="card tight" style="margin-bottom:14px">
+      <div class="card-head" style="margin-bottom:10px">
+        <div class="lead"><span class="head-ico grey">${icon('file')}</span>
+          <div><p class="h-eyebrow">Documents</p><h3>Files</h3></div></div>
+        <label class="btn ghost small" style="cursor:pointer">
+          + Attach
+          <input type="file" data-file-input="${esc(o.id)}" hidden />
+        </label>
+      </div>
+      <div data-files="${esc(o.id)}">${attachmentsHtml(o.id)}</div>
     </div>
 
     ${o.live.rag === 'CLOSED'
@@ -1001,6 +1154,45 @@ function openDrawer(id, silent) {
   requestAnimationFrame(() => host.classList.add('open'));
   $$('[data-drawer-close]', host).forEach((el) => el.addEventListener('click', closeDrawer));
   if (!silent) return;
+}
+
+function notesHtml(orderId) {
+  if (S.notes.orderId !== orderId) {
+    if (!S.notes.loading) loadNotes(orderId);
+    return '<div class="empty" style="padding:14px">Loading notes…</div>';
+  }
+  const rows = S.notes.rows || [];
+  if (!rows.length) return '<div class="empty" style="padding:14px">Nothing said yet. The first note starts the thread.</div>';
+  return `<div class="note-list">${rows.map((n) => `
+    <div class="note-row">
+      <span class="team-ava small">${esc(initials(n.author_name, ''))}</span>
+      <div class="note-body">
+        <span class="note-meta"><b>${esc(n.author_name || 'Someone')}</b> · ${esc(String(n.created_at).slice(0, 16).replace('T', ' '))}
+          ${n.kind === 'update' ? '<span class="tl-badge">update</span>' : ''}</span>
+        <p>${esc(n.body)}</p>
+      </div>
+      ${cap('delete') ? `<button class="icon-btn" data-act="del-note" data-id="${esc(n.order_id)}" data-note="${esc(n.id)}" title="Delete note">×</button>` : ''}
+    </div>`).join('')}</div>`;
+}
+
+async function loadNotes(orderId) {
+  if (S.notes.loading) return;
+  S.notes.loading = true;
+  try {
+    const res = await api('/api/orders/' + encodeURIComponent(orderId) + '/notes');
+    S.notes.orderId = orderId;
+    S.notes.rows = res.notes || [];
+  } catch (e) {
+    S.notes.orderId = orderId;
+    S.notes.rows = [];
+  } finally {
+    S.notes.loading = false;
+  }
+  // redraw only the note block so the date pickers and scroll position survive
+  const host = document.querySelector(`[data-notes="${orderId}"]`);
+  if (host) host.innerHTML = notesHtml(orderId);
+  const count = document.querySelector(`[data-notes-count="${orderId}"]`);
+  if (count) count.textContent = S.notes.rows ? S.notes.rows.length || '' : '';
 }
 
 function stageRowHtml(o, m, plan) {
@@ -1294,9 +1486,7 @@ function viewUsers() {
                 </select>
               </td>
               <td>
-                ${(u.email || '').toLowerCase() === SUPER_ADMIN_EMAIL
-                  ? '<span class="badge amber">Admin</span>'
-                  : `<select class="role-input" data-user-role="${esc(u.sub)}" data-current="${esc(u.role)}" ${canManage ? '' : 'disabled'}>
+                ${`<select class="role-input" data-user-role="${esc(u.sub)}" data-current="${esc(u.role)}" ${canManage ? '' : 'disabled'}>
                        ${roleList(u.role)}
                      </select>`}
               </td>
@@ -1322,6 +1512,375 @@ function viewUsers() {
         Department mapping: ${S.d.meta.depts.map((d) => esc(d)).join(' · ')}.
         A custom role keeps Editor-level access inside that department.
         A department super admin gets advanced Settings; Access control opens for the Super Admin department.
+      </p>
+    </div>
+  </div>`;
+}
+
+
+/* ── sessions & devices ────────────────────────────────────── */
+async function loadSessions() {
+  if (S.sessions.loading) return;
+  S.sessions.loading = true;
+  try {
+    const res = await api('/api/sessions');
+    S.sessions.rows = res.sessions || [];
+    S.sessions.scope = res.scope || 'own';
+  } catch (e) {
+    S.sessions.rows = [];
+    toast(e.message || 'Could not load devices', 'err');
+  } finally {
+    S.sessions.loading = false;
+  }
+  if (S.view === 'sessions') render();
+}
+
+function relTime(iso) {
+  if (!iso) return '—';
+  const ms = Date.now() - Date.parse(iso);
+  if (!Number.isFinite(ms)) return '—';
+  const m = Math.round(ms / 60000);
+  if (m < 1) return 'just now';
+  if (m < 60) return `${m}m ago`;
+  const h = Math.round(m / 60);
+  if (h < 24) return `${h}h ago`;
+  return `${Math.round(h / 24)}d ago`;
+}
+
+function viewSessions() {
+  if (!S.sessions.rows && !S.sessions.loading) {
+    loadSessions();
+    return `<div class="empty">Loading devices…</div>`;
+  }
+  const rows = S.sessions.rows || [];
+  const mine = rows.filter((r) => !r.current);
+  const isAdmin = S.sessions.scope === 'all';
+
+  return `
+  <div class="grid cols-4">
+    ${kpiTile('Signed-in devices', rows.length, isAdmin ? 'across every account' : 'on your account', 'accent')}
+    ${kpiTile('This device', 'Active', 'the one you are using now', 'green')}
+    ${kpiTile('Others', mine.length, mine.length ? 'sign out anything you do not recognise' : 'nothing else is signed in', mine.length ? 'amber' : 'green')}
+    ${kpiTile('Session life', '30 days', 'idle sessions expire on their own', 'blue')}
+  </div>
+
+  <div class="card flush" style="margin-top:14px">
+    <div class="card-head">
+      <div class="lead">
+        <span class="head-ico grey">${icon('shield')}</span>
+        <div><p class="h-eyebrow">Security</p><h3>${isAdmin ? 'Every signed-in device' : 'Where you are signed in'}</h3></div>
+      </div>
+      <div class="inline">
+        <button class="btn ghost small" data-act="sessions-refresh">Refresh</button>
+        <button class="btn danger small" data-act="revoke-others" ${mine.length ? '' : 'disabled'}>Sign out other devices</button>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th>Device</th>${isAdmin ? '<th>Account</th>' : ''}<th>Address</th><th>Signed in</th><th>Last active</th><th></th>
+        </tr></thead>
+        <tbody>
+          ${rows.length ? rows.map((r) => `<tr>
+            <td>
+              <div class="cell-id">
+                <span class="dev-ico">${icon(/phone|android|ios/i.test(r.device) ? 'phone' : 'monitor')}</span>
+                <div><span class="cust">${esc(r.device)}</span>${r.current ? '<small class="sub-line" style="color:var(--green,#4ade80)">this device</small>' : ''}</div>
+              </div>
+            </td>
+            ${isAdmin ? `<td><span class="cust">${esc((r.user && (r.user.name || r.user.email)) || '—')}</span>${r.user ? `<small class="sub-line">${esc(r.user.email || '')}</small>` : ''}</td>` : ''}
+            <td class="mono" style="font-size:11.5px">${esc(r.ip || '—')}</td>
+            <td>${relTime(r.created_at)}</td>
+            <td>${relTime(r.last_seen)}</td>
+            <td class="num">
+              ${r.current
+                ? '<span class="badge green">Current</span>'
+                : `<button class="btn ghost small" data-act="revoke-session" data-id="${esc(r.id)}">Sign out</button>`}
+            </td>
+          </tr>`).join('') : '<tr><td colspan="6" class="empty">No devices found.</td></tr>'}
+        </tbody>
+      </table>
+    </div>
+    <div style="padding:13px 18px;border-top:1px solid var(--line);background:var(--surface-2)">
+      <p class="sub-line" style="margin:0">
+        If you see a device you do not recognise, sign it out and change your password — changing it signs out every other device automatically.
+      </p>
+    </div>
+  </div>`;
+}
+
+
+/* ── customers ─────────────────────────────────────────────── */
+async function loadCustomers() {
+  if (S.customers.loading) return;
+  S.customers.loading = true;
+  try {
+    const res = await api('/api/customers');
+    S.customers.rows = res.customers || [];
+    S.customers.missing = res.missing || [];
+  } catch (e) {
+    S.customers.rows = [];
+    toast(e.message || 'Could not load customers', 'err');
+  } finally {
+    S.customers.loading = false;
+  }
+  if (S.view === 'customers') render();
+}
+
+function viewCustomers() {
+  const C = S.customers;
+  if (!C.rows && !C.loading) {
+    loadCustomers();
+    return `<div class="empty">Loading customers…</div>`;
+  }
+  const q = C.q.trim().toLowerCase();
+  const rows = (C.rows || []).filter((c) => {
+    if (!q) return true;
+    return [c.name, c.contact, c.city, c.email, c.phone, c.gstin].filter(Boolean).join(' ').toLowerCase().includes(q);
+  });
+  const totalMt = rows.reduce((s, c) => s + (Number(c.total_mt) || 0), 0);
+  const active = (C.rows || []).filter((c) => c.active).length;
+
+  return `
+  <div class="grid cols-4">
+    ${kpiTile('Customers', (C.rows || []).length, `${active} active`, 'accent')}
+    ${kpiTile('Order book', n1(totalMt) + ' MT', 'across the customers shown', 'blue')}
+    ${kpiTile('Repeat', (C.rows || []).filter((c) => c.orders > 1).length, 'with more than one order', 'green')}
+    ${kpiTile('Not in master', (C.missing || []).length, 'names found in the order book', (C.missing || []).length ? 'amber' : 'green')}
+  </div>
+
+  ${(C.missing || []).length ? `<div class="note" style="margin-top:14px">
+    <strong>${C.missing.length} customer name${C.missing.length === 1 ? '' : 's'} from the order book are not in the master yet.</strong>
+    They are already on orders — adding them here just lets you keep contacts, GSTIN and history in one place.
+    <div style="flex:1"></div>
+    <button class="btn primary small" data-act="customers-backfill">Add all ${C.missing.length} in one click</button>
+  </div>` : ''}
+
+  <div class="card flush" style="margin-top:14px">
+    <div class="card-head">
+      <div class="lead">
+        <span class="head-ico grey">${icon('building')}</span>
+        <div><p class="h-eyebrow">Customer master</p><h3>${rows.length} customer${rows.length === 1 ? '' : 's'}</h3></div>
+      </div>
+      <div class="inline">
+        <label class="search-wrap">${icon('search')}
+          <input class="search" id="custQ" placeholder="Search name, city, GSTIN…" value="${esc(C.q)}" />
+        </label>
+        ${cap('order') ? '<button class="btn primary small" data-act="new-customer">+ New customer</button>' : ''}
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Customer</th><th>Contact</th><th>Location</th><th>GSTIN</th>
+          <th class="num">Orders</th><th class="num">MT</th><th>Last order</th><th></th></tr></thead>
+        <tbody>
+          ${rows.length ? rows.map((c) => `<tr class="${c.active ? '' : 'muted'}">
+            <td><span class="cust">${esc(c.name)}</span>${c.active ? '' : '<small class="sub-line">inactive</small>'}</td>
+            <td>${esc(c.contact || '—')}${c.phone ? `<small class="sub-line">${esc(c.phone)}</small>` : ''}</td>
+            <td>${esc([c.city, c.state].filter(Boolean).join(', ') || '—')}</td>
+            <td class="mono" style="font-size:11.5px">${esc(c.gstin || '—')}</td>
+            <td class="num">${c.orders || 0}${c.open_orders ? `<small class="sub-line">${c.open_orders} open</small>` : ''}</td>
+            <td class="num">${n1(c.total_mt)}</td>
+            <td>${c.last_order_at ? fmt(String(c.last_order_at).slice(0, 10)) : '—'}</td>
+            <td class="num inline" style="justify-content:flex-end">
+              ${cap('order') ? `<button class="btn ghost small" data-act="edit-customer" data-id="${esc(c.id)}">Edit</button>` : ''}
+              ${cap('delete') ? `<button class="icon-btn" data-act="del-customer" data-id="${esc(c.id)}" data-name="${esc(c.name)}" title="Delete">×</button>` : ''}
+            </td>
+          </tr>`).join('') : `<tr><td colspan="8" class="empty">${C.rows && C.rows.length ? 'Nothing matches that search.' : 'No customers yet. Add one, or import the names already on your orders.'}</td></tr>`}
+        </tbody>
+      </table>
+    </div>
+  </div>`;
+}
+
+
+
+/* ── saved views ──────────────────────────────────────────���────
+   Filters people rebuild every morning ("my late orders", "this month's
+   dispatch") should be a click, not five dropdowns. Stored per browser, which
+   keeps it private and needs no migration. */
+const VIEW_KEY = 'ars-saved-views';
+
+function savedViews() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(VIEW_KEY) || '[]');
+    return Array.isArray(raw) ? raw : [];
+  } catch { return []; }
+}
+
+function writeSavedViews(list) {
+  try { localStorage.setItem(VIEW_KEY, JSON.stringify(list.slice(0, 12))); } catch { /* private mode */ }
+}
+
+function currentFilterState() {
+  return { q: S.q, status: S.status, rag: S.rag, stage: S.stage };
+}
+
+function applyView(id) {
+  const v = savedViews().find((x) => x.id === id);
+  if (!v) return;
+  S.q = v.f.q || '';
+  S.status = v.f.status || 'all';
+  S.rag = v.f.rag || 'all';
+  S.stage = v.f.stage || 'all';
+  if (S.view !== 'orders') location.hash = '#/orders';
+  render();
+  toast(`View “${v.name}” applied`, 'ok');
+}
+
+function deleteView(id) {
+  writeSavedViews(savedViews().filter((x) => x.id !== id));
+  render();
+}
+
+function saveViewModal() {
+  modal({
+    title: 'Save this view',
+    sub: 'The filter you are looking at, available in one click next time.',
+    body: field('Name *', 'name', '', 'text', 'required maxlength="40" placeholder="Late design work"'),
+    submit: 'Save view',
+    async onSubmit(data) {
+      const name = String(data.name || '').trim();
+      if (!name) throw new Error('Give the view a name');
+      const list = savedViews().filter((v) => v.name.toLowerCase() !== name.toLowerCase());
+      list.unshift({ id: 'v' + Date.now(), name, f: currentFilterState() });
+      writeSavedViews(list);
+      closeModal();
+      render();
+      toast('View saved', 'ok');
+    },
+  });
+}
+
+function viewChips() {
+  const list = savedViews();
+  if (!list.length) return '';
+  return `<div class="view-chips">
+    <span class="vc-label">Saved</span>
+    ${list.map((v) => `<span class="view-chip" data-act="apply-view" data-view="${esc(v.id)}" title="${esc(describeFilters(v.f))}">
+      ${esc(v.name)}
+      <button class="vc-x" data-act="del-view" data-view="${esc(v.id)}" title="Remove this view">×</button>
+    </span>`).join('')}
+  </div>`;
+}
+
+function describeFilters(f) {
+  const parts = [];
+  if (f.q) parts.push(`search “${f.q}”`);
+  if (f.status && f.status !== 'all') parts.push(f.status);
+  if (f.rag && f.rag !== 'all') parts.push(f.rag.toLowerCase());
+  if (f.stage && f.stage !== 'all') parts.push('stage ' + f.stage);
+  return parts.length ? parts.join(' · ') : 'everything';
+}
+
+/* ── analytics ─────────────────────────────────────────────── */
+async function loadAnalytics() {
+  if (S.analytics.loading) return;
+  S.analytics.loading = true;
+  try {
+    const res = await api('/api/analytics');
+    S.analytics.data = res.analytics;
+  } catch (e) {
+    toast(e.message || 'Could not load analytics', 'err');
+  } finally {
+    S.analytics.loading = false;
+  }
+  if (S.view === 'analytics') render();
+}
+
+/** A tiny inline bar chart — no chart library, no build weight. */
+function bars(rows, pick, opts = {}) {
+  const max = Math.max(1, ...rows.map((r) => Number(pick.value(r)) || 0));
+  const fmtv = opts.format || ((v) => n1(v));
+  return `<div class="bars">${rows.map((r) => {
+    const v = Number(pick.value(r)) || 0;
+    const w = Math.max(v > 0 ? 3 : 0, Math.round((v / max) * 100));
+    return `<div class="bar-row" title="${esc(pick.label(r))}: ${esc(fmtv(v))}">
+      <span class="bar-lbl">${esc(pick.label(r))}</span>
+      <span class="bar-track"><i class="${pick.tone ? pick.tone(r) : ''}" style="width:${w}%"></i></span>
+      <b class="bar-val">${esc(fmtv(v))}</b>
+    </div>`;
+  }).join('')}</div>`;
+}
+
+function viewAnalytics() {
+  const A = S.analytics;
+  if (!A.data && !A.loading) {
+    loadAnalytics();
+    return `<div class="empty">Loading analytics…</div>`;
+  }
+  const d = A.data || { months: [], cycle: [], load: [], delivery: {} };
+  const del = d.delivery || {};
+  const peak = d.months.reduce((m, x) => (x.mt > (m.mt || 0) ? x : m), { mt: 0 });
+
+  return `
+  <div class="grid cols-4">
+    ${kpiTile('On-time delivery', del.otif === null ? '—' : del.otif + '%', del.decided ? `${del.onTime} of ${del.decided} closed orders` : 'no closed orders yet', del.otif === null ? 'blue' : del.otif >= 90 ? 'green' : del.otif >= 75 ? 'amber' : 'red')}
+    ${kpiTile('Lead time', del.leadTime === null ? '—' : del.leadTime + ' d', 'confirmation to dispatch', 'accent')}
+    ${kpiTile('Book to ship', del.monthsOfBook === null ? '—' : del.monthsOfBook + ' mo', 'open MT at recent throughput', 'blue')}
+    ${kpiTile('Peak month', n1(peak.mt) + ' MT', peak.label || '—', 'dispatched in the window', 'green')}
+  </div>
+
+  <div class="split-2" style="margin-top:14px">
+    <div class="card">
+      <div class="card-head">
+        <div class="lead"><span class="head-ico grey">${icon('chart')}</span>
+          <div><p class="h-eyebrow">Throughput</p><h3>Production completed per month</h3></div></div>
+        <span class="hint">MT, by production-done date</span>
+      </div>
+      ${d.months.length ? bars(d.months, {
+        label: (r) => r.label,
+        value: (r) => r.mt,
+        tone: (r) => (r.mt >= (peak.mt || 0) && r.mt > 0 ? 'good' : ''),
+      }) : '<div class="empty">No completed production yet.</div>'}
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <div class="lead"><span class="head-ico grey">${icon('clock')}</span>
+          <div><p class="h-eyebrow">Departments</p><h3>Where the work is sitting</h3></div></div>
+        <span class="hint">open orders by current department</span>
+      </div>
+      ${d.load.length ? bars(d.load, {
+        label: (r) => r.dept,
+        value: (r) => r.open,
+        tone: (r) => (r.late > 0 ? 'bad' : ''),
+      }, { format: (v) => String(v) }) : '<div class="empty">Nothing open right now.</div>'}
+      ${d.load.some((l) => l.late) ? `<p class="sub-line" style="margin-top:10px">${d.load.filter((l) => l.late).map((l) => `${esc(l.dept)}: ${l.late} late`).join(' · ')}</p>` : ''}
+    </div>
+  </div>
+
+  <div class="card flush" style="margin-top:14px">
+    <div class="card-head">
+      <div class="lead"><span class="head-ico grey">${icon('clock')}</span>
+        <div><p class="h-eyebrow">Cycle time</p><h3>How long each stage really takes</h3></div></div>
+      <span class="hint">committed date minus the previous stage</span>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Stage</th><th>Department</th><th class="num">Samples</th><th class="num">Average</th>
+          <th class="num">Slowest</th><th class="num">Plan</th><th>Verdict</th></tr></thead>
+        <tbody>
+          ${d.cycle.length ? d.cycle.map((c) => {
+            const over = c.target > 0 && c.avg > c.target;
+            return `<tr>
+              <td><span class="cust">${esc(c.label)}</span></td>
+              <td>${esc(c.dept)}</td>
+              <td class="num">${c.samples}</td>
+              <td class="num"><b>${c.avg} d</b></td>
+              <td class="num">${c.worst} d</td>
+              <td class="num">${c.target ? c.target + ' d' : '—'}</td>
+              <td>${!c.target ? '<span class="badge grey">no plan</span>'
+                : over ? `<span class="badge amber">${Math.round((c.avg - c.target) * 10) / 10} d over</span>`
+                : '<span class="badge green">within plan</span>'}</td>
+            </tr>`;
+          }).join('') : '<tr><td colspan="7" class="empty">Mark some stages done — the cycle times appear here.</td></tr>'}
+        </tbody>
+      </table>
+    </div>
+    <div style="padding:13px 18px;border-top:1px solid var(--line);background:var(--surface-2)">
+      <p class="sub-line" style="margin:0">
+        Average is the arithmetic mean of every completed order; the slowest is the worst single case — that is the one to look at when a customer complains.
       </p>
     </div>
   </div>`;
@@ -1519,23 +2078,70 @@ function numField(label, name, value, enabled, step) {
 }
 
 /* ── activity ──────────────────────────────────────────────── */
+async function loadActivity(append = false) {
+  const A = S.activity;
+  if (A.loading) return;
+  A.loading = true;
+  try {
+    const before = append && A.rows && A.rows.length ? A.rows[A.rows.length - 1].id : '';
+    const qs = new URLSearchParams({ limit: '150', entity: A.entity === 'all' ? '' : A.entity, q: A.q });
+    if (before) qs.set('before', String(before));
+    const res = await api('/api/activity?' + qs.toString());
+    A.rows = append ? [...(A.rows || []), ...(res.activity || [])] : res.activity || [];
+    A.entities = res.entities || A.entities;
+  } catch (e) {
+    toast(e.message || 'Could not load activity', 'err');
+    if (!append) A.rows = [];
+  } finally {
+    A.loading = false;
+  }
+  if (S.view === 'activity') render();
+}
+
+const ENTITY_LABEL = {
+  order: 'Orders', dispatch: 'Dispatches', user: 'Users', settings: 'Settings',
+  session: 'Sessions', stakeholder: 'Teams', person: 'People', access: 'Access requests',
+  notify: 'Alerts', import: 'Imports',
+};
+
 function viewActivity() {
-  const rows = S.d.activity || [];
+  const A = S.activity;
+  if (!A.rows && !A.loading) {
+    loadActivity();
+    return `<div class="empty">Loading activity…</div>`;
+  }
+  const rows = A.rows || [];
   return `<div class="card flush">
     <div class="card-head">
       <div class="lead">
         <span class="head-ico grey">${icon('clock')}</span>
-        <div><p class="h-eyebrow">Audit trail</p><h3>Recent activity</h3></div>
+        <div><p class="h-eyebrow">Audit trail</p><h3>Who changed what</h3></div>
       </div>
-      <span class="hint">last ${rows.length} events</span>
+      <div class="inline">
+        <label class="search-wrap">
+          ${icon('search')}
+          <input class="search" id="auditQ" placeholder="Search activity…" value="${esc(A.q)}" />
+        </label>
+        <select id="auditEntity">
+          <option value="all">Everything</option>
+          ${A.entities.map((e) => `<option value="${esc(e)}" ${A.entity === e ? 'selected' : ''}>${esc(ENTITY_LABEL[e] || e)}</option>`).join('')}
+        </select>
+      </div>
     </div>
     <div style="padding:6px 18px 16px">
     ${rows.length ? `<div class="timeline">${rows.map((e) => `
       <div class="tl-row">
         <div class="tl-time">${esc(String(e.at).slice(0, 16).replace('T', ' '))}</div>
-        <div class="tl-body"><strong>${esc(e.actor_name || 'System')}</strong> ${esc(e.detail || e.action)}
-          ${e.entity_id ? `<span class="mono" style="color:var(--text-3)"> · ${esc(e.entity_id)}</span>` : ''}</div>
-      </div>`).join('')}</div>` : '<div class="empty">No activity yet.</div>'}
+        <div class="tl-body">
+          <span class="tl-badge">${esc(ENTITY_LABEL[e.entity] || e.entity)}</span>
+          <strong>${esc(e.actor_name || 'System')}</strong> ${esc(e.detail || e.action)}
+          ${e.entity_id ? `<span class="mono" style="color:var(--text-3)"> · ${esc(e.entity_id)}</span>` : ''}
+        </div>
+      </div>`).join('')}</div>
+      <div class="inline" style="justify-content:center;margin-top:16px">
+        <button class="btn ghost small" data-act="audit-more">Load older</button>
+      </div>`
+      : `<div class="empty">${A.q || A.entity !== 'all' ? 'Nothing matches that filter.' : 'No activity yet.'}</div>`}
     </div>
   </div>`;
 }
@@ -1547,6 +2153,112 @@ function closeModal() {
   const host = $('#modal');
   host.classList.remove('open');
   host.innerHTML = '';
+}
+
+
+/* ── command palette (Ctrl/⌘ K) ────────────────────────────────
+   The fastest way through the app: jump to a screen, find an order or a
+   customer, or run an action you already know you want. Same idea as Linear,
+   Notion and GitHub. */
+const PALETTE = { open: false, q: '', index: 0, items: [] };
+
+function paletteItems(query) {
+  const q = String(query || '').trim().toLowerCase();
+  const out = [];
+  const screens = Object.entries(VIEWS).filter(([id]) => {
+    if (id === 'users' || id === 'settings') return !!(cap('users') || cap('settings'));
+    return true;
+  });
+  for (const [id, v] of screens) {
+    out.push({ kind: 'Go to', label: v.title, hint: v.sub, run: () => { location.hash = '#/' + id; } });
+  }
+  if (cap('order')) out.push({ kind: 'Action', label: 'New order', hint: 'Create an order from a customer PO', run: () => orderModal(null) });
+  if (cap('order')) out.push({ kind: 'Action', label: 'New customer', hint: 'Add to the customer master', run: () => customerModal(null) });
+  if (cap('disp')) out.push({ kind: 'Action', label: 'Dispatch entry', hint: 'Record a batch, vehicle and invoice', run: () => dispatchModal(null) });
+  out.push({ kind: 'Action', label: 'Export orders', hint: 'Download the order book as CSV', run: () => exportOrders() });
+  out.push({ kind: 'Action', label: 'Toggle theme', hint: 'Light / dark', run: () => toggleTheme() });
+
+  const orders = (S.d && S.d.orders) || [];
+  const customers = S.customers.rows || [];
+  const orderItem = (o) => ({
+    kind: 'Order',
+    label: `${o.id} · ${o.customer || 'No customer'}`,
+    hint: `${o.live.stage} · ${n1(o.mt)} MT · ${o.live.rag}`,
+    run: () => { location.hash = '#/orders'; openDrawer(o.id); },
+  });
+  const custItem = (c) => ({
+    kind: 'Customer',
+    label: c.name,
+    hint: [c.city, c.contact, c.orders ? `${c.orders} orders` : ''].filter(Boolean).join(' · '),
+    run: () => { S.customers.q = c.name; location.hash = '#/customers'; },
+  });
+
+  if (!q) return out.slice(0, 9).concat(orders.slice(0, 3).map(orderItem));
+  const m = (text) => String(text || '').toLowerCase().includes(q);
+  return [
+    ...out.filter((i) => m(i.label) || m(i.hint)),
+    ...orders.filter((o) => m(o.id) || m(o.customer) || m(o.project)).slice(0, 6).map(orderItem),
+    ...customers.filter((c) => m(c.name) || m(c.city) || m(c.contact)).slice(0, 4).map(custItem),
+  ].slice(0, 24);
+}
+
+function paletteRender() {
+  const host = $('#palette');
+  if (!host) return;
+  const items = PALETTE.items;
+  if (PALETTE.index >= items.length) PALETTE.index = Math.max(0, items.length - 1);
+  host.innerHTML = `
+    <div class="palette-backdrop" data-act="palette-close"></div>
+    <div class="palette" role="dialog" aria-label="Command palette">
+      <div class="palette-input">
+        ${icon('search')}
+        <input id="paletteQ" value="${esc(PALETTE.q)}" placeholder="Search orders, customers, screens, actions…" autocomplete="off" spellcheck="false" />
+        <kbd>esc</kbd>
+      </div>
+      <div class="palette-list">
+        ${items.length ? items.map((it, i) => `
+          <button class="palette-item ${i === PALETTE.index ? 'sel' : ''}" data-palette-i="${i}">
+            <span class="pi-kind">${esc(it.kind)}</span>
+            <span class="pi-main"><b>${esc(it.label)}</b>${it.hint ? `<small>${esc(it.hint)}</small>` : ''}</span>
+            ${i === PALETTE.index ? '<span class="pi-enter">↵</span>' : ''}
+          </button>`).join('') : '<div class="empty" style="padding:22px">Nothing matches that.</div>'}
+      </div>
+      <div class="palette-foot">
+        <span><kbd>↑</kbd><kbd>↓</kbd> move</span><span><kbd>↵</kbd> open</span><span><kbd>esc</kbd> close</span>
+      </div>
+    </div>`;
+  host.hidden = false;
+  const input = $('#paletteQ');
+  if (input) { input.focus(); input.setSelectionRange(input.value.length, input.value.length); }
+}
+
+function paletteOpen() {
+  if (!S.d) return;
+  PALETTE.open = true;
+  PALETTE.q = '';
+  PALETTE.index = 0;
+  PALETTE.items = paletteItems('');
+  paletteRender();
+  if (!S.customers.rows) api('/api/customers').then((r) => { S.customers.rows = r.customers || []; }).catch(() => {});
+}
+
+function paletteClose() {
+  PALETTE.open = false;
+  const host = $('#palette');
+  if (host) { host.hidden = true; host.innerHTML = ''; }
+}
+
+function paletteMove(delta) {
+  if (!PALETTE.items.length) return;
+  PALETTE.index = (PALETTE.index + delta + PALETTE.items.length) % PALETTE.items.length;
+  paletteRender();
+}
+
+function paletteRun(i) {
+  const item = PALETTE.items[i];
+  if (!item) return;
+  paletteClose();
+  try { item.run(); } catch (e) { toast(e.message || 'Could not run that', 'err'); }
 }
 
 function modal(opts) {
@@ -1564,6 +2276,7 @@ function modal(opts) {
     </form>
   </div>`;
   const form = $('#modalForm');
+  wirePwMeters(host);
   $$('[data-modal-close]', host).forEach((b) => b.addEventListener('click', closeModal));
   form.addEventListener('submit', async (ev) => {
     ev.preventDefault();
@@ -1579,6 +2292,56 @@ function modal(opts) {
 function field(label, name, value, type = 'text', extra = '') {
   return `<label class="field"><span>${esc(label)}</span>
     <input name="${name}" type="${type}" value="${esc(value)}" ${extra} /></label>`;
+}
+
+/**
+ * Same rules as the server (auth.ts passwordScore), so the meter never says
+ * "strong" about something the API will reject.
+ */
+function pwScore(pw) {
+  const s = String(pw || '');
+  if (!s) return 0;
+  const WEAK = new Set(['password', 'password1', 'password123', 'passw0rd', '12345678', '1234567890',
+    'qwerty123', 'admin123', 'welcome1', 'letmein1', 'changeme', 'solar1234']);
+  if (WEAK.has(s.toLowerCase().trim())) return 1;
+  let score = 0;
+  if (s.length >= 8) score += 1;
+  if (s.length >= 12) score += 1;
+  if (s.length >= 16) score += 1;
+  const classes = [/[a-z]/, /[A-Z]/, /[0-9]/, /[^A-Za-z0-9]/].filter((r) => r.test(s)).length;
+  if (classes >= 2) score += 1;
+  return Math.min(4, score);
+}
+
+/** A password input with a live strength bar underneath. */
+function pwField(label, name, extra = '') {
+  return `<label class="field"><span>${esc(label)}</span>
+    <input name="${name}" type="password" autocomplete="new-password" data-pw-meter="${name}" ${extra} />
+    <div class="pw-meter" data-pw-bar="${name}" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+    <small class="pw-hint" data-pw-hint="${name}">At least 8 characters</small>
+  </label>`;
+}
+
+function wirePwMeters(root = document) {
+  const WORDS = ['Too short', 'Weak', 'Fair', 'Good', 'Strong'];
+  $$('[data-pw-meter]', root).forEach((input) => {
+    const name = input.dataset.pwMeter;
+    const bar = root.querySelector(`[data-pw-bar="${name}"]`);
+    const hint = root.querySelector(`[data-pw-hint="${name}"]`);
+    const paint = () => {
+      const score = pwScore(input.value);
+      if (bar) {
+        bar.dataset.score = String(score);
+        $$('i', bar).forEach((seg, i) => seg.classList.toggle('on', i < score && input.value.length > 0));
+      }
+      if (hint) {
+        hint.textContent = input.value ? WORDS[score] || '' : 'At least 8 characters';
+        hint.dataset.score = String(score);
+      }
+    };
+    input.addEventListener('input', paint);
+    paint();
+  });
 }
 
 function selectField(label, name, value, options) {
@@ -1920,11 +2683,11 @@ function requestAccessModal() {
 
 function resetPasswordModal(sub, name) {
   const body = `<div class="form-grid">
-    ${field('New password *', 'password', '', 'password', 'required minlength="8"')}
+    ${pwField('New password', 'password', 'required minlength="8" autocomplete="new-password"')}
   </div>`;
   modal({
     title: `Reset password — ${name}`,
-    sub: 'Tell them the new password; their existing sessions stay signed in.',
+    sub: 'Tell them the new password. Their other devices are signed out so the change actually takes effect.',
     body,
     submit: 'Set password',
     async onSubmit(data) {
@@ -1933,8 +2696,81 @@ function resetPasswordModal(sub, name) {
       apply(res);
       closeModal();
       render();
-      toast('Password updated', 'ok');
+      toast('Password updated and old sessions signed out', 'ok');
     },
+  });
+}
+
+
+function customerModal(existing) {
+  const c = existing || {};
+  const body = `
+    <div class="form-grid">
+      ${field('Customer name *', 'name', c.name || '', 'text', 'required maxlength="160"')}
+      ${field('Contact person', 'contact', c.contact || '')}
+      ${field('Phone', 'phone', c.phone || '', 'tel')}
+      ${field('Email', 'email', c.email || '', 'email')}
+      ${field('GSTIN', 'gstin', c.gstin || '', 'text', 'maxlength="20"')}
+      ${field('City', 'city', c.city || '')}
+      ${field('State', 'state', c.state || '')}
+      ${field('PIN', 'pincode', c.pincode || '', 'text', 'maxlength="10"')}
+    </div>
+    <label class="field"><span>Address</span>
+      <textarea name="address" rows="2">${esc(c.address || '')}</textarea></label>
+    <label class="field"><span>Notes</span>
+      <textarea name="notes" rows="2" placeholder="Payment terms, relationship history, anything the team should know">${esc(c.notes || '')}</textarea></label>
+    ${existing ? `<label class="inline" style="margin-top:4px">
+      <input type="checkbox" name="active" ${c.active ? 'checked' : ''} /> <span class="sub-line" style="margin:0">Active (unticked keeps the record but hides it from new orders)</span>
+    </label>` : ''}`;
+  modal({
+    title: existing ? `Edit ${c.name}` : 'New customer',
+    sub: existing ? 'Contact details, billing address and notes.' : 'The master record every order can draw its details from.',
+    body,
+    submit: existing ? 'Save customer' : 'Add customer',
+    async onSubmit(data) {
+      const payload = { ...data, active: existing ? (data.active ? 1 : 0) : 1 };
+      const res = existing
+        ? await api('/api/customers/' + encodeURIComponent(c.id), 'PATCH', payload)
+        : await api('/api/customers', 'POST', payload);
+      S.customers.rows = res.customers;
+      if (res.missing) S.customers.missing = res.missing;
+      closeModal();
+      render();
+      toast(existing ? 'Customer updated' : 'Customer added', 'ok');
+    },
+  });
+}
+
+function tagModal(orderId) {
+  const o = S.d.orders.find((x) => x.id === orderId);
+  if (!o) return;
+  const current = (o.tags || []).join(', ');
+  const known = (S.d.tags || []).map((t) => t.tag);
+  const body = `
+    ${field('Tags (comma separated)', 'tags', current, 'text', 'maxlength="160" placeholder="urgent, rework, hold"')}
+    <p class="sub-line">Up to 8 tags, 24 characters each. Tags are filterable and appear on the order row.</p>
+    ${known.length ? `<div class="inline" style="margin-top:10px">${known.map((t) => `<button type="button" class="tag" data-tag-pick="${esc(t)}">${esc(t)}</button>`).join('')}</div>` : ''}`;
+  modal({
+    title: `Tags — ${o.customer || o.id}`,
+    sub: 'A fast way to group orders that need the same attention.',
+    body,
+    submit: 'Save tags',
+    async onSubmit(data) {
+      const tags = String(data.tags || '').split(',').map((t) => t.trim()).filter(Boolean);
+      const res = await api('/api/orders/' + encodeURIComponent(o.id) + '/tags', 'PUT', { tags });
+      apply(res);
+      closeModal();
+      render();
+      toast('Tags saved', 'ok');
+    },
+  });
+  $$('[data-tag-pick]', $('#modal')).forEach((b) => {
+    b.addEventListener('click', () => {
+      const input = $('[name=tags]', $('#modal'));
+      const list = input.value.split(',').map((t) => t.trim()).filter(Boolean);
+      if (!list.includes(b.dataset.tagPick)) list.push(b.dataset.tagPick);
+      input.value = list.join(', ');
+    });
   });
 }
 
@@ -2144,6 +2980,110 @@ function exportDispatches() {
    actions
    ══════════════════════════════════════════════════════════════ */
 const ACTIONS = {
+  'del-file': async (el) => {
+    if (!confirm('Remove this file?')) return;
+    try {
+      const res = await api('/api/attachments/' + encodeURIComponent(el.dataset.id), 'DELETE');
+      S.files.orderId = el.dataset.order;
+      S.files.rows = res.attachments || [];
+      const host = document.querySelector(`[data-files="${el.dataset.order}"]`);
+      if (host) host.innerHTML = attachmentsHtml(el.dataset.order);
+      apply(res.snapshot);
+      toast('File removed', 'ok');
+    } catch (e) { toast(e.message, 'err'); }
+  },
+  'palette-open': () => paletteOpen(),
+  'palette-close': () => paletteClose(),
+  'print': () => window.print(),
+  'save-view': () => saveViewModal(),
+  'apply-view': (el) => applyView(el.dataset.view),
+  'del-view': (el) => deleteView(el.dataset.view),
+  'new-customer': () => customerModal(null),
+  'edit-customer': (el) => {
+    const c = (S.customers.rows || []).find((x) => x.id === el.dataset.id);
+    if (c) customerModal(c);
+  },
+  'del-customer': async (el) => {
+    if (!confirm(`Delete ${el.dataset.name} from the customer master? Orders stay as they are.`)) return;
+    try {
+      const res = await api('/api/customers/' + encodeURIComponent(el.dataset.id), 'DELETE');
+      S.customers.rows = res.customers;
+      S.customers.missing = res.missing;
+      render();
+      toast('Customer deleted', 'ok');
+    } catch (e) { toast(e.message, 'err'); }
+  },
+  'customers-backfill': async () => {
+    try {
+      const res = await api('/api/customers/backfill', 'POST', {});
+      S.customers.rows = res.customers;
+      S.customers.missing = res.missing;
+      render();
+      toast(`${res.added} customer(s) added from the order book`, 'ok');
+    } catch (e) { toast(e.message, 'err'); }
+  },
+  'add-note': async (el) => {
+    const id = el.dataset.id;
+    const box = document.querySelector(`[data-note-input="${id}"]`);
+    const body = box ? box.value.trim() : '';
+    if (!body) { if (box) box.focus(); return; }
+    el.disabled = true;
+    try {
+      const res = await api('/api/orders/' + encodeURIComponent(id) + '/notes', 'POST', { body });
+      S.notes.orderId = id;
+      S.notes.rows = res.notes || [];
+      if (box) box.value = '';
+      const host = document.querySelector(`[data-notes="${id}"]`);
+      if (host) host.innerHTML = notesHtml(id);
+      const count = document.querySelector(`[data-notes-count="${id}"]`);
+      if (count) count.textContent = S.notes.rows.length || '';
+      toast('Note posted', 'ok');
+    } catch (e) { toast(e.message, 'err'); }
+    el.disabled = false;
+  },
+  'del-note': async (el) => {
+    if (!confirm('Delete this note?')) return;
+    const id = el.dataset.id;
+    try {
+      const res = await api(`/api/orders/${encodeURIComponent(id)}/notes/${encodeURIComponent(el.dataset.note)}`, 'DELETE');
+      S.notes.orderId = id;
+      S.notes.rows = res.notes || [];
+      const host = document.querySelector(`[data-notes="${id}"]`);
+      if (host) host.innerHTML = notesHtml(id);
+    } catch (e) { toast(e.message, 'err'); }
+  },
+  'tag-order': (el) => tagModal(el.dataset.id),
+  'untag-order': async (el) => {
+    const o = S.d.orders.find((x) => x.id === el.dataset.id);
+    if (!o) return;
+    const tags = (o.tags || []).filter((t) => t !== el.dataset.tag);
+    try {
+      const res = await api('/api/orders/' + encodeURIComponent(o.id) + '/tags', 'PUT', { tags });
+      apply(res);
+      render();
+    } catch (e) { toast(e.message, 'err'); }
+  },
+  'bulk-clear': () => { S.picked.clear(); render(); },
+  'audit-more': () => loadActivity(true),
+  'sessions-refresh': () => loadSessions(),
+  'revoke-session': async (el) => {
+    const id = el.dataset.id;
+    if (!confirm('Sign that device out? It will have to sign in again.')) return;
+    el.disabled = true;
+    try {
+      const res = await api('/api/sessions/revoke', 'POST', { id });
+      await loadSessions();
+      toast(res.revoked ? 'Device signed out' : 'That device was already gone', 'ok');
+    } catch (e) { toast(e.message, 'err'); el.disabled = false; }
+  },
+  'revoke-others': async () => {
+    if (!confirm('Sign out every other device? You stay signed in here.')) return;
+    try {
+      const res = await api('/api/sessions/revoke-others', 'POST');
+      await loadSessions();
+      toast(res.revoked ? `${res.revoked} device(s) signed out` : 'No other devices to sign out', 'ok');
+    } catch (e) { toast(e.message, 'err'); }
+  },
   'open-order': (el) => openDrawer(el.dataset.id),
   'close-drawer': () => closeDrawer(),
   'new-order': () => orderModal(null),
@@ -2453,9 +3393,94 @@ document.addEventListener('input', (ev) => {
   if (ev.target.id === 'fStage') { S.stage = ev.target.value; render(); }
 });
 
+// Audit search is debounced: it hits the server, so typing must not fire a
+// request per keystroke.
+document.addEventListener('input', (ev) => {
+  if (ev.target.id === 'custQ') {
+    S.customers.q = ev.target.value;
+    const pos = ev.target.selectionStart;
+    render();
+    const q = $('#custQ');
+    if (q) { q.focus(); q.setSelectionRange(pos, pos); }
+  }
+});
+
+let auditTimer = 0;
+document.addEventListener('input', (ev) => {
+  if (ev.target.id !== 'auditQ') return;
+  S.activity.q = ev.target.value;
+  clearTimeout(auditTimer);
+  auditTimer = setTimeout(() => { loadActivity(); }, 280);
+});
+document.addEventListener('change', async (ev) => {
+  if (ev.target.dataset && ev.target.dataset.fileInput) {
+    const input = ev.target;
+    const orderId = input.dataset.fileInput;
+    const file = input.files && input.files[0];
+    if (!file) return;
+    const limit = S.files.maxBytes || 1048576;
+    if (file.size > limit) {
+      toast(`That file is ${fmtBytes(file.size)} — the limit is ${fmtBytes(limit)}${S.files.storage === 'd1' ? ' without a storage bucket bound' : ''}`, 'err');
+      input.value = '';
+      return;
+    }
+    toast(`Uploading ${file.name}…`, 'ok');
+    try {
+      await uploadFile(orderId, file);
+      toast('File attached', 'ok');
+    } catch (e) {
+      toast(e.message || 'Upload failed', 'err');
+    }
+    input.value = '';
+    return;
+  }
+  if (ev.target.id === 'auditEntity') {
+    S.activity.entity = ev.target.value;
+    loadActivity();
+    return;
+  }
+  if (ev.target.id === 'pickAll') {
+    const rows = filteredOrders();
+    if (ev.target.checked) rows.forEach((o) => S.picked.add(o.id));
+    else S.picked.clear();
+    render();
+    return;
+  }
+  if (ev.target.dataset && ev.target.dataset.pick) {
+    const id = ev.target.dataset.pick;
+    if (ev.target.checked) S.picked.add(id);
+    else S.picked.delete(id);
+    render();
+    return;
+  }
+  if (ev.target.id === 'bulkAction' && ev.target.value) {
+    const [action, ...rest] = ev.target.value.split(':');
+    const value = rest.join(':');
+    const ids = [...S.picked];
+    if (!ids.length) return;
+    const label = action === 'delete'
+      ? `Delete ${ids.length} order(s) and everything on them?`
+      : `Apply "${action}${value ? ' → ' + value : ''}" to ${ids.length} order(s)?`;
+    if (!confirm(label)) { ev.target.value = ''; return; }
+    ev.target.disabled = true;
+    try {
+      const res = await api('/api/orders/bulk', 'POST', { ids, action, value });
+      S.picked.clear();
+      apply(res);
+      render();
+      toast(`${res.changed} order(s) updated`, 'ok');
+    } catch (e) {
+      toast(e.message, 'err');
+      ev.target.disabled = false;
+    }
+  }
+});
+
 // The status chip is not a reload button — but tapping it forces a sync, which
 // is what anyone instinctively tries. It just never looks like a control.
 document.addEventListener('click', (ev) => {
+  // A checkbox in a clickable row is a selection, not a navigation.
+  if (ev.target.closest && ev.target.closest('.pick, .tag')) { ev.stopPropagation(); return; }
   if (!ev.target.closest || !ev.target.closest('[data-act="sync-check"]')) return;
   if (Date.now() < SYNC.busyUntil) return;
   syncPull();
@@ -2474,7 +3499,44 @@ window.addEventListener('hashchange', () => {
 });
 
 document.addEventListener('keydown', (ev) => {
+  // ⌘K / Ctrl+K — the shortcut people already have in their fingers.
+  if ((ev.metaKey || ev.ctrlKey) && String(ev.key).toLowerCase() === 'k') {
+    ev.preventDefault();
+    if (PALETTE.open) paletteClose(); else paletteOpen();
+    return;
+  }
+  if (PALETTE.open) {
+    if (ev.key === 'Escape') { ev.preventDefault(); paletteClose(); return; }
+    if (ev.key === 'ArrowDown') { ev.preventDefault(); paletteMove(1); return; }
+    if (ev.key === 'ArrowUp') { ev.preventDefault(); paletteMove(-1); return; }
+    if (ev.key === 'Enter') {
+      // if focus is in the search box, Enter runs the highlighted row
+      ev.preventDefault();
+      paletteRun(PALETTE.index);
+      return;
+    }
+  }
   if (ev.key === 'Escape') { closeModal(); closeDrawer(); }
+  // A single "/" focuses the search box on the screen you are on.
+  if (ev.key === '/' && !PLAINTEXT.includes(document.activeElement && document.activeElement.tagName)) {
+    const box = $('#q') || $('#custQ');
+    if (box) { ev.preventDefault(); box.focus(); }
+  }
+});
+
+const PLAINTEXT = ['INPUT', 'TEXTAREA', 'SELECT'];
+
+document.addEventListener('input', (ev) => {
+  if (ev.target.id !== 'paletteQ') return;
+  PALETTE.q = ev.target.value;
+  PALETTE.index = 0;
+  PALETTE.items = paletteItems(PALETTE.q);
+  paletteRender();
+});
+
+document.addEventListener('click', (ev) => {
+  const item = ev.target.closest && ev.target.closest('[data-palette-i]');
+  if (item) { paletteRun(Number(item.dataset.paletteI)); }
 });
 
 /* ── boot ──────────────────────────────────────────────────── */

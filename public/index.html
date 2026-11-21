@@ -66,7 +66,9 @@
         </label>
         <div class="field-row">
           <label class="field"><span>Password (min 8)</span>
-            <input name="password" type="password" autocomplete="new-password" required minlength="8" />
+            <input name="password" type="password" autocomplete="new-password" required minlength="8" data-pw-meter="password" />
+            <div class="pw-meter" data-pw-bar="password" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+            <small class="pw-hint" data-pw-hint="password">At least 8 characters</small>
           </label>
           <label class="field"><span>Repeat password</span>
             <input name="password2" type="password" autocomplete="new-password" required minlength="8" />
@@ -120,6 +122,11 @@
         </div>
 
         <div class="seg">
+          <div class="menu-wrap">
+            <button class="icon-btn" data-act="palette-open" aria-label="Search everything" title="Search everything — Ctrl K">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+            </button>
+          </div>
           <div class="menu-wrap">
             <button class="icon-btn" data-act="theme" id="themeBtn" aria-label="Switch colour theme" title="Switch theme"></button>
           </div>
@@ -198,6 +205,7 @@
 
 <div id="drawer" class="drawer"></div>
 <div id="modal" class="modal-host"></div>
+  <div id="palette" class="palette-host" hidden></div>
 <div id="toasts" class="toasts"></div>
 
 <script src="app.js"></script>
