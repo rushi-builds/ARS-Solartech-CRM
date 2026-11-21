@@ -66,7 +66,9 @@
         </label>
         <div class="field-row">
           <label class="field"><span>Password (min 8)</span>
-            <input name="password" type="password" autocomplete="new-password" required minlength="8" />
+            <input name="password" type="password" autocomplete="new-password" required minlength="8" data-pw-meter="password" />
+            <div class="pw-meter" data-pw-bar="password" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+            <small class="pw-hint" data-pw-hint="password">At least 8 characters</small>
           </label>
           <label class="field"><span>Repeat password</span>
             <input name="password2" type="password" autocomplete="new-password" required minlength="8" />

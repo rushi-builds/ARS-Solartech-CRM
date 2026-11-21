@@ -15,9 +15,11 @@ async function ensureSchemaOnce(db: D1Database): Promise<void> {
 }
 import {
   clearSessionCookie,
+  describeAgent,
   hashPassword,
   newSessionToken,
   passwordProblem,
+  passwordScore,
   readSessionToken,
   sameOrigin,
   sessionCookie,
@@ -70,6 +72,7 @@ import {
   deleteDeptPerson,
   listDeptPeople,
   listEvents,
+  listEventEntities,
   listNotifications,
   listOrderRows,
   listStageRows,
@@ -78,6 +81,11 @@ import {
   listUsers,
   getUser,
   logEvent,
+  listUserSessions,
+  listAllSessions,
+  revokeSession,
+  revokeOtherSessions,
+  touchSession,
   queueNotification,
   saveDispatch,
   saveOrder,
@@ -178,9 +186,21 @@ app.get('/healthz', async (c) => {
 });
 
 // ---------------------------------------------------------------- auth (public)
+/** The caller's address, best effort: Cloudflare sets CF-Connecting-IP. */
+function clientIp(c: any): string | null {
+  return (
+    c.req.header('cf-connecting-ip') ||
+    (c.req.header('x-forwarded-for') || '').split(',')[0].trim() ||
+    null
+  );
+}
+
 async function startSession(c: any, user: User) {
   const { token, tokenHash } = await newSessionToken();
-  await createSession(c.env.DB, user.sub, tokenHash, sessionExpiry());
+  await createSession(c.env.DB, user.sub, tokenHash, sessionExpiry(), {
+    userAgent: c.req.header('user-agent') || null,
+    ip: clientIp(c),
+  });
   c.header('Set-Cookie', sessionCookie(token, siteOrigin(c)));
 }
 
@@ -328,6 +348,9 @@ app.use('/api/*', async (c, next) => {
     return c.json({ error: 'signin_required', message: 'Sign in required', needsSetup: await noUsersYet(c.env.DB) }, 401);
   }
   c.set('user', user);
+  c.set('sessionHash', await sha256(token as string));
+  // "Last active" on the devices screen, written at most once an hour per row.
+  await touchSession(c.env.DB, await sha256(token as string), new Date().toISOString());
   // Permissions come from the matrix an admin edits in Settings, resolved once
   // per request so every guard below sees the same answer.
   const settings = await getSettings(c.env.DB);
@@ -1146,13 +1169,25 @@ app.patch('/api/users/:sub', async (c) => {
     return c.json({ error: 'self_disable', message: 'You cannot disable your own account' }, 400);
   }
 
-  await updateUser(c.env.DB, sub, { role, dept, active, phone, deptAdmin });
-  if (typeof body.password === 'string' && body.password) {
-    const problem = passwordProblem(body.password);
+  // Validate the password *before* writing anything: a rejected password used
+  // to leave the role/department change behind, so a 400 still changed the user.
+  const newPassword = typeof body.password === 'string' && body.password ? body.password : null;
+  if (newPassword) {
+    const problem = passwordProblem(newPassword);
     if (problem) return c.json({ error: 'weak_password', message: problem }, 400);
-    await setPassword(c.env.DB, sub, await hashPassword(body.password));
+  }
+
+  await updateUser(c.env.DB, sub, { role, dept, active, phone, deptAdmin });
+  if (newPassword) {
+    await setPassword(c.env.DB, sub, await hashPassword(newPassword));
+    // A password reset must actually lock the old holder out. Keep the caller's
+    // own session when they reset themselves, drop everything else.
+    const keepSelf = me.sub === sub ? String(c.get('sessionHash') || '') : '';
+    const n = keepSelf
+      ? await revokeOtherSessions(c.env.DB, sub, keepSelf)
+      : await revokeOtherSessions(c.env.DB, sub, '');
     await logEvent(c.env.DB, { sub: me.sub, name: me.name }, 'user', sub, 'password',
-      `Password reset for ${target.name || target.email || sub}`);
+      `Password reset for ${target.name || target.email || sub}${n ? `, ${n} session(s) signed out` : ''}`);
   }
   await logEvent(c.env.DB, { sub: me.sub, name: me.name }, 'user', sub, 'update',
     `${target.name || target.email || sub}: role=${role ?? target.role}, dept=${dept ?? '-'}, active=${active ?? target.active}${deptAdmin !== undefined ? ', dept admin=' + (deptAdmin ? 'yes' : 'no') : ''}`);
@@ -1245,14 +1280,29 @@ app.post('/api/import', async (c) => {
   const body = await jsonBody(c);
   const rows = Array.isArray(body.rows) ? body.rows.slice(0, 500) : [];
   const u: User = c.get('user');
+  const dryRun = body.dryRun === true;
   let created = 0;
   const skipped: string[] = [];
-  for (const r of rows) {
+  const problems: { row: number; text: string; reason: string }[] = [];
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i] || {};
     const customer = str(r.customer, 200);
+    const label = String(r.customer || r.project || r.id || `row ${i + 1}`).slice(0, 80);
     if (!customer) {
-      skipped.push(String(r.project || r.id || 'row without customer'));
+      skipped.push(label);
+      problems.push({ row: i + 1, text: label, reason: 'No customer name' });
       continue;
     }
+    // Dates are the usual culprit in a sheet export: Excel gives serial numbers
+    // and dd/mm/yyyy strings. Anything unreadable is imported as "no date" and
+    // reported, rather than silently dropped or crashing the plan later.
+    for (const k of ['po_date', 'conf_date', 'due_date']) {
+      if (r[k] && !validDate(r[k])) problems.push({ row: i + 1, text: label, reason: `${k} "${String(r[k]).slice(0, 24)}" is not a date` });
+    }
+    if (r.mt !== undefined && r.mt !== '' && !Number.isFinite(Number(r.mt))) {
+      problems.push({ row: i + 1, text: label, reason: `mt "${String(r.mt).slice(0, 24)}" is not a number` });
+    }
+    if (dryRun) continue;
     try {
       const id = await nextId(c.env.DB, fyPrefix(), 'orders');
       await saveOrder(
@@ -1283,8 +1333,19 @@ app.post('/api/import', async (c) => {
       skipped.push(`${customer} (save failed)`);
     }
   }
-  await logEvent(c.env.DB, { sub: u.sub, name: u.name }, 'order', null, 'import', `${created} orders imported`);
-  return c.json({ ok: true, created, skipped, snapshot: await snapshot(c) });
+  const summary = dryRun
+    ? `${rows.length} rows checked, ${problems.length} problem(s)`
+    : `${created} orders imported, ${skipped.length} skipped`;
+  await logEvent(c.env.DB, { sub: u.sub, name: u.name }, 'order', null, dryRun ? 'import_check' : 'import', summary);
+  return c.json({
+    ok: true,
+    dryRun,
+    checked: rows.length,
+    created,
+    skipped,
+    problems: problems.slice(0, 100),
+    snapshot: dryRun ? undefined : await snapshot(c),
+  });
 });
 
 // ---------------------------------------------------------------- escalations + alerts
@@ -1420,9 +1481,68 @@ app.post('/api/ai/chat', async (c) => {
 });
 
 // ---------------------------------------------------------------- activity
+// ---------------------------------------------------------------- sessions
+app.get('/api/sessions', async (c) => {
+  const me: User = c.get('user');
+  const caps = c.get('caps') as Record<string, boolean>;
+  const rows = caps.users ? await listAllSessions(c.env.DB) : await listUserSessions(c.env.DB, me.sub);
+  const current = String(c.get('sessionHash') || '');
+  return c.json({
+    sessions: rows.map((r) => ({
+      id: r.id,
+      device: describeAgent(r.user_agent),
+      ip: r.ip,
+      created_at: r.created_at,
+      last_seen: r.last_seen,
+      expires_at: r.expires_at,
+      current: current.startsWith(r.id),
+      user: caps.users && r.email ? { email: r.email, name: r.name } : undefined,
+    })),
+    scope: caps.users ? 'all' : 'own',
+  });
+});
+
+app.post('/api/sessions/revoke', async (c) => {
+  const me: User = c.get('user');
+  const caps = c.get('caps') as Record<string, boolean>;
+  const body = await jsonBody(c);
+  const id = String(body.id || '');
+  if (!id) return c.json({ error: 'bad_request', message: 'Which session?' }, 400);
+  if (!caps.users && !(await listUserSessions(c.env.DB, me.sub)).some((r) => r.id.startsWith(id))) {
+    return c.json({ error: 'forbidden', message: 'That session is not yours' }, 403);
+  }
+  const n = await revokeSession(c.env.DB, id, caps.users ? undefined : me.sub);
+  await logEvent(c.env.DB, { sub: me.sub, name: me.name }, 'session', id, 'revoke',
+    `${me.name || me.email} signed out a device`);
+  return c.json({ ok: true, revoked: n });
+});
+
+app.post('/api/sessions/revoke-others', async (c) => {
+  const me: User = c.get('user');
+  const keep = String(c.get('sessionHash') || '');
+  const n = await revokeOtherSessions(c.env.DB, me.sub, keep);
+  await logEvent(c.env.DB, { sub: me.sub, name: me.name }, 'session', me.sub, 'revoke_others',
+    `${me.name || me.email} signed out of ${n} other device${n === 1 ? '' : 's'}`);
+  return c.json({ ok: true, revoked: n });
+});
+
+// ---------------------------------------------------------------- activity
 app.get('/api/activity', async (c) => {
   const limit = Math.min(500, Math.max(1, Number(c.req.query('limit')) || 200));
-  return c.json({ activity: await listEvents(c.env.DB, limit) });
+  // The audit trail is the first place anyone looks after a mistake, so it can
+  // be narrowed to one entity, one person, or a phrase — and paged backwards.
+  const events = await listEvents(c.env.DB, {
+    limit,
+    entity: c.req.query('entity') || undefined,
+    actor: c.req.query('actor') || undefined,
+    q: c.req.query('q') || undefined,
+    before: Number(c.req.query('before')) || undefined,
+  });
+  return c.json({
+    activity: events,
+    entities: await listEventEntities(c.env.DB),
+    nextBefore: events.length ? (events[events.length - 1] as any).id : null,
+  });
 });
 
 // ---------------------------------------------------------------- static SPA

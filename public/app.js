@@ -259,14 +259,24 @@ const ICONS = {
   users: '<circle cx="9" cy="8" r="3.2"/><path d="M3 20c0-3.3 2.7-5.5 6-5.5s6 2.2 6 5.5"/><path d="M17 5.2a3.2 3.2 0 0 1 0 6.1"/><path d="M18 14.6c2 .7 3 2.4 3 4.4"/>',
   gear: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>',
   clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/>',
+  shield: '<path d="M12 3l7 3v6c0 4.4-3 8-7 9-4-1-7-4.6-7-9V6z"/><path d="M9 12l2 2 4-4"/>',
+  monitor: '<rect x="2.5" y="4" width="19" height="12.5" rx="2"/><path d="M8 20.5h8"/><path d="M12 16.5v4"/>',
+  phone: '<rect x="7" y="2.5" width="10" height="19" rx="2.4"/><path d="M11 18.5h2"/>',
+  search: '<circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/>',
+  filter: '<path d="M3 5h18"/><path d="M6.5 12h11"/><path d="M10 19h4"/>',
+  download: '<path d="M12 3v12"/><path d="M7.5 10.5L12 15l4.5-4.5"/><path d="M4 20h16"/>',
 };
 const icon = (name) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${ICONS[name] || ''}</svg>`;
 
 /* ── state ─────────────────────────────────────────────────── */
-const S = { d: null, view: 'dashboard', q: '', status: 'all', rag: 'all', stage: 'all', open: null };
+const S = {
+  d: null, view: 'dashboard', q: '', status: 'all', rag: 'all', stage: 'all', open: null,
+  // The audit trail is fetched on demand because it is searchable/paged, and
+  // the devices screen likewise: neither belongs in the 20s snapshot.
+  activity: { rows: null, entities: [], entity: 'all', q: '', loading: false },
+  sessions: { rows: null, scope: 'own', loading: false },
+};
 
-/* The designated super admin account: always owner, never demotable. */
-const SUPER_ADMIN_EMAIL = 'rushidhumal.04@gmail.com';
 const FULL_ROLES = ['owner', 'admin', 'manager'];
 
 const VIEWS = {
@@ -277,6 +287,7 @@ const VIEWS = {
   users: { title: 'Users & roles', sub: 'Who can see what, and who can change it', icon: 'users' },
   settings: { title: 'Settings', sub: 'Advanced backend settings — planning, access control, alerts and teams', icon: 'gear' },
   activity: { title: 'Activity', sub: 'Every change, who made it and when', icon: 'clock' },
+  sessions: { title: 'Sessions & devices', sub: 'Where this workspace is signed in, and how to sign it out', icon: 'shield' },
 };
 
 /* ── API ───────────────────────────────────────────────────── */
@@ -378,6 +389,7 @@ async function loadApp() {
 }
 
 function wireAuthForms() {
+  wirePwMeters(document);
   const loginForm = $('#loginForm');
   if (loginForm) {
     loginForm.addEventListener('submit', async (ev) => {
@@ -464,6 +476,7 @@ function render() {
     users: viewUsers,
     settings: viewSettings,
     activity: viewActivity,
+    sessions: viewSessions,
   })[S.view]();
   const viewEl = $('#view');
   viewEl.innerHTML = html;
@@ -597,6 +610,7 @@ function renderNav() {
     { id: 'users', hide: !cap('users') && !cap('settings') },
     { id: 'settings', hide: !cap('settings') && !cap('users') },
     { id: 'activity' },
+    { id: 'sessions' },
   ];
   $('#nav').innerHTML = items.map((it) => {
     if (it.sep) return `<div class="nav-sep">${esc(it.sep)}</div>`;
@@ -1294,9 +1308,7 @@ function viewUsers() {
                 </select>
               </td>
               <td>
-                ${(u.email || '').toLowerCase() === SUPER_ADMIN_EMAIL
-                  ? '<span class="badge amber">Admin</span>'
-                  : `<select class="role-input" data-user-role="${esc(u.sub)}" data-current="${esc(u.role)}" ${canManage ? '' : 'disabled'}>
+                ${`<select class="role-input" data-user-role="${esc(u.sub)}" data-current="${esc(u.role)}" ${canManage ? '' : 'disabled'}>
                        ${roleList(u.role)}
                      </select>`}
               </td>
@@ -1322,6 +1334,98 @@ function viewUsers() {
         Department mapping: ${S.d.meta.depts.map((d) => esc(d)).join(' · ')}.
         A custom role keeps Editor-level access inside that department.
         A department super admin gets advanced Settings; Access control opens for the Super Admin department.
+      </p>
+    </div>
+  </div>`;
+}
+
+
+/* ── sessions & devices ────────────────────────────────────── */
+async function loadSessions() {
+  if (S.sessions.loading) return;
+  S.sessions.loading = true;
+  try {
+    const res = await api('/api/sessions');
+    S.sessions.rows = res.sessions || [];
+    S.sessions.scope = res.scope || 'own';
+  } catch (e) {
+    S.sessions.rows = [];
+    toast(e.message || 'Could not load devices', 'err');
+  } finally {
+    S.sessions.loading = false;
+  }
+  if (S.view === 'sessions') render();
+}
+
+function relTime(iso) {
+  if (!iso) return '—';
+  const ms = Date.now() - Date.parse(iso);
+  if (!Number.isFinite(ms)) return '—';
+  const m = Math.round(ms / 60000);
+  if (m < 1) return 'just now';
+  if (m < 60) return `${m}m ago`;
+  const h = Math.round(m / 60);
+  if (h < 24) return `${h}h ago`;
+  return `${Math.round(h / 24)}d ago`;
+}
+
+function viewSessions() {
+  if (!S.sessions.rows && !S.sessions.loading) {
+    loadSessions();
+    return `<div class="empty">Loading devices…</div>`;
+  }
+  const rows = S.sessions.rows || [];
+  const mine = rows.filter((r) => !r.current);
+  const isAdmin = S.sessions.scope === 'all';
+
+  return `
+  <div class="grid cols-4">
+    ${kpiTile('Signed-in devices', rows.length, isAdmin ? 'across every account' : 'on your account', 'accent')}
+    ${kpiTile('This device', 'Active', 'the one you are using now', 'green')}
+    ${kpiTile('Others', mine.length, mine.length ? 'sign out anything you do not recognise' : 'nothing else is signed in', mine.length ? 'amber' : 'green')}
+    ${kpiTile('Session life', '30 days', 'idle sessions expire on their own', 'blue')}
+  </div>
+
+  <div class="card flush" style="margin-top:14px">
+    <div class="card-head">
+      <div class="lead">
+        <span class="head-ico grey">${icon('shield')}</span>
+        <div><p class="h-eyebrow">Security</p><h3>${isAdmin ? 'Every signed-in device' : 'Where you are signed in'}</h3></div>
+      </div>
+      <div class="inline">
+        <button class="btn ghost small" data-act="sessions-refresh">Refresh</button>
+        <button class="btn danger small" data-act="revoke-others" ${mine.length ? '' : 'disabled'}>Sign out other devices</button>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th>Device</th>${isAdmin ? '<th>Account</th>' : ''}<th>Address</th><th>Signed in</th><th>Last active</th><th></th>
+        </tr></thead>
+        <tbody>
+          ${rows.length ? rows.map((r) => `<tr>
+            <td>
+              <div class="cell-id">
+                <span class="dev-ico">${icon(/phone|android|ios/i.test(r.device) ? 'phone' : 'monitor')}</span>
+                <div><span class="cust">${esc(r.device)}</span>${r.current ? '<small class="sub-line" style="color:var(--green,#4ade80)">this device</small>' : ''}</div>
+              </div>
+            </td>
+            ${isAdmin ? `<td><span class="cust">${esc((r.user && (r.user.name || r.user.email)) || '—')}</span>${r.user ? `<small class="sub-line">${esc(r.user.email || '')}</small>` : ''}</td>` : ''}
+            <td class="mono" style="font-size:11.5px">${esc(r.ip || '—')}</td>
+            <td>${relTime(r.created_at)}</td>
+            <td>${relTime(r.last_seen)}</td>
+            <td class="num">
+              ${r.current
+                ? '<span class="badge green">Current</span>'
+                : `<button class="btn ghost small" data-act="revoke-session" data-id="${esc(r.id)}">Sign out</button>`}
+            </td>
+          </tr>`).join('') : '<tr><td colspan="6" class="empty">No devices found.</td></tr>'}
+        </tbody>
+      </table>
+    </div>
+    <div style="padding:13px 18px;border-top:1px solid var(--line);background:var(--surface-2)">
+      <p class="sub-line" style="margin:0">
+        If you see a device you do not recognise, sign it out and change your password — changing it signs out every other device automatically.
       </p>
     </div>
   </div>`;
@@ -1519,23 +1623,70 @@ function numField(label, name, value, enabled, step) {
 }
 
 /* ── activity ──────────────────────────────────────────────── */
+async function loadActivity(append = false) {
+  const A = S.activity;
+  if (A.loading) return;
+  A.loading = true;
+  try {
+    const before = append && A.rows && A.rows.length ? A.rows[A.rows.length - 1].id : '';
+    const qs = new URLSearchParams({ limit: '150', entity: A.entity === 'all' ? '' : A.entity, q: A.q });
+    if (before) qs.set('before', String(before));
+    const res = await api('/api/activity?' + qs.toString());
+    A.rows = append ? [...(A.rows || []), ...(res.activity || [])] : res.activity || [];
+    A.entities = res.entities || A.entities;
+  } catch (e) {
+    toast(e.message || 'Could not load activity', 'err');
+    if (!append) A.rows = [];
+  } finally {
+    A.loading = false;
+  }
+  if (S.view === 'activity') render();
+}
+
+const ENTITY_LABEL = {
+  order: 'Orders', dispatch: 'Dispatches', user: 'Users', settings: 'Settings',
+  session: 'Sessions', stakeholder: 'Teams', person: 'People', access: 'Access requests',
+  notify: 'Alerts', import: 'Imports',
+};
+
 function viewActivity() {
-  const rows = S.d.activity || [];
+  const A = S.activity;
+  if (!A.rows && !A.loading) {
+    loadActivity();
+    return `<div class="empty">Loading activity…</div>`;
+  }
+  const rows = A.rows || [];
   return `<div class="card flush">
     <div class="card-head">
       <div class="lead">
         <span class="head-ico grey">${icon('clock')}</span>
-        <div><p class="h-eyebrow">Audit trail</p><h3>Recent activity</h3></div>
+        <div><p class="h-eyebrow">Audit trail</p><h3>Who changed what</h3></div>
       </div>
-      <span class="hint">last ${rows.length} events</span>
+      <div class="inline">
+        <label class="search-wrap">
+          ${icon('search')}
+          <input class="search" id="auditQ" placeholder="Search activity…" value="${esc(A.q)}" />
+        </label>
+        <select id="auditEntity">
+          <option value="all">Everything</option>
+          ${A.entities.map((e) => `<option value="${esc(e)}" ${A.entity === e ? 'selected' : ''}>${esc(ENTITY_LABEL[e] || e)}</option>`).join('')}
+        </select>
+      </div>
     </div>
     <div style="padding:6px 18px 16px">
     ${rows.length ? `<div class="timeline">${rows.map((e) => `
       <div class="tl-row">
         <div class="tl-time">${esc(String(e.at).slice(0, 16).replace('T', ' '))}</div>
-        <div class="tl-body"><strong>${esc(e.actor_name || 'System')}</strong> ${esc(e.detail || e.action)}
-          ${e.entity_id ? `<span class="mono" style="color:var(--text-3)"> · ${esc(e.entity_id)}</span>` : ''}</div>
-      </div>`).join('')}</div>` : '<div class="empty">No activity yet.</div>'}
+        <div class="tl-body">
+          <span class="tl-badge">${esc(ENTITY_LABEL[e.entity] || e.entity)}</span>
+          <strong>${esc(e.actor_name || 'System')}</strong> ${esc(e.detail || e.action)}
+          ${e.entity_id ? `<span class="mono" style="color:var(--text-3)"> · ${esc(e.entity_id)}</span>` : ''}
+        </div>
+      </div>`).join('')}</div>
+      <div class="inline" style="justify-content:center;margin-top:16px">
+        <button class="btn ghost small" data-act="audit-more">Load older</button>
+      </div>`
+      : `<div class="empty">${A.q || A.entity !== 'all' ? 'Nothing matches that filter.' : 'No activity yet.'}</div>`}
     </div>
   </div>`;
 }
@@ -1564,6 +1715,7 @@ function modal(opts) {
     </form>
   </div>`;
   const form = $('#modalForm');
+  wirePwMeters(host);
   $$('[data-modal-close]', host).forEach((b) => b.addEventListener('click', closeModal));
   form.addEventListener('submit', async (ev) => {
     ev.preventDefault();
@@ -1579,6 +1731,56 @@ function modal(opts) {
 function field(label, name, value, type = 'text', extra = '') {
   return `<label class="field"><span>${esc(label)}</span>
     <input name="${name}" type="${type}" value="${esc(value)}" ${extra} /></label>`;
+}
+
+/**
+ * Same rules as the server (auth.ts passwordScore), so the meter never says
+ * "strong" about something the API will reject.
+ */
+function pwScore(pw) {
+  const s = String(pw || '');
+  if (!s) return 0;
+  const WEAK = new Set(['password', 'password1', 'password123', 'passw0rd', '12345678', '1234567890',
+    'qwerty123', 'admin123', 'welcome1', 'letmein1', 'changeme', 'solar1234']);
+  if (WEAK.has(s.toLowerCase().trim())) return 1;
+  let score = 0;
+  if (s.length >= 8) score += 1;
+  if (s.length >= 12) score += 1;
+  if (s.length >= 16) score += 1;
+  const classes = [/[a-z]/, /[A-Z]/, /[0-9]/, /[^A-Za-z0-9]/].filter((r) => r.test(s)).length;
+  if (classes >= 2) score += 1;
+  return Math.min(4, score);
+}
+
+/** A password input with a live strength bar underneath. */
+function pwField(label, name, extra = '') {
+  return `<label class="field"><span>${esc(label)}</span>
+    <input name="${name}" type="password" autocomplete="new-password" data-pw-meter="${name}" ${extra} />
+    <div class="pw-meter" data-pw-bar="${name}" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+    <small class="pw-hint" data-pw-hint="${name}">At least 8 characters</small>
+  </label>`;
+}
+
+function wirePwMeters(root = document) {
+  const WORDS = ['Too short', 'Weak', 'Fair', 'Good', 'Strong'];
+  $$('[data-pw-meter]', root).forEach((input) => {
+    const name = input.dataset.pwMeter;
+    const bar = root.querySelector(`[data-pw-bar="${name}"]`);
+    const hint = root.querySelector(`[data-pw-hint="${name}"]`);
+    const paint = () => {
+      const score = pwScore(input.value);
+      if (bar) {
+        bar.dataset.score = String(score);
+        $$('i', bar).forEach((seg, i) => seg.classList.toggle('on', i < score && input.value.length > 0));
+      }
+      if (hint) {
+        hint.textContent = input.value ? WORDS[score] || '' : 'At least 8 characters';
+        hint.dataset.score = String(score);
+      }
+    };
+    input.addEventListener('input', paint);
+    paint();
+  });
 }
 
 function selectField(label, name, value, options) {
@@ -1920,11 +2122,11 @@ function requestAccessModal() {
 
 function resetPasswordModal(sub, name) {
   const body = `<div class="form-grid">
-    ${field('New password *', 'password', '', 'password', 'required minlength="8"')}
+    ${pwField('New password', 'password', 'required minlength="8" autocomplete="new-password"')}
   </div>`;
   modal({
     title: `Reset password — ${name}`,
-    sub: 'Tell them the new password; their existing sessions stay signed in.',
+    sub: 'Tell them the new password. Their other devices are signed out so the change actually takes effect.',
     body,
     submit: 'Set password',
     async onSubmit(data) {
@@ -1933,7 +2135,7 @@ function resetPasswordModal(sub, name) {
       apply(res);
       closeModal();
       render();
-      toast('Password updated', 'ok');
+      toast('Password updated and old sessions signed out', 'ok');
     },
   });
 }
@@ -2144,6 +2346,26 @@ function exportDispatches() {
    actions
    ══════════════════════════════════════════════════════════════ */
 const ACTIONS = {
+  'audit-more': () => loadActivity(true),
+  'sessions-refresh': () => loadSessions(),
+  'revoke-session': async (el) => {
+    const id = el.dataset.id;
+    if (!confirm('Sign that device out? It will have to sign in again.')) return;
+    el.disabled = true;
+    try {
+      const res = await api('/api/sessions/revoke', 'POST', { id });
+      await loadSessions();
+      toast(res.revoked ? 'Device signed out' : 'That device was already gone', 'ok');
+    } catch (e) { toast(e.message, 'err'); el.disabled = false; }
+  },
+  'revoke-others': async () => {
+    if (!confirm('Sign out every other device? You stay signed in here.')) return;
+    try {
+      const res = await api('/api/sessions/revoke-others', 'POST');
+      await loadSessions();
+      toast(res.revoked ? `${res.revoked} device(s) signed out` : 'No other devices to sign out', 'ok');
+    } catch (e) { toast(e.message, 'err'); }
+  },
   'open-order': (el) => openDrawer(el.dataset.id),
   'close-drawer': () => closeDrawer(),
   'new-order': () => orderModal(null),
@@ -2451,6 +2673,22 @@ document.addEventListener('input', (ev) => {
   if (ev.target.id === 'fStatus') { S.status = ev.target.value; render(); }
   if (ev.target.id === 'fRag') { S.rag = ev.target.value; render(); }
   if (ev.target.id === 'fStage') { S.stage = ev.target.value; render(); }
+});
+
+// Audit search is debounced: it hits the server, so typing must not fire a
+// request per keystroke.
+let auditTimer = 0;
+document.addEventListener('input', (ev) => {
+  if (ev.target.id !== 'auditQ') return;
+  S.activity.q = ev.target.value;
+  clearTimeout(auditTimer);
+  auditTimer = setTimeout(() => { loadActivity(); }, 280);
+});
+document.addEventListener('change', (ev) => {
+  if (ev.target.id === 'auditEntity') {
+    S.activity.entity = ev.target.value;
+    loadActivity();
+  }
 });
 
 // The status chip is not a reload button — but tapping it forces a sync, which

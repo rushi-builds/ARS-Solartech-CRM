@@ -95,6 +95,17 @@ const ALTERS: string[] = [
   )`,
   `CREATE INDEX IF NOT EXISTS idx_notifications_at ON notifications(at DESC)`,
   `CREATE INDEX IF NOT EXISTS idx_notifications_sub ON notifications(sub)`,
+  // Session metadata so a user can see and revoke their own signed-in devices.
+  `ALTER TABLE sessions ADD COLUMN user_agent TEXT`,
+  `ALTER TABLE sessions ADD COLUMN ip TEXT`,
+  `ALTER TABLE sessions ADD COLUMN last_seen TEXT`,
+  `CREATE INDEX IF NOT EXISTS idx_sessions_expiry ON sessions(expires_at)`,
+  // Foreign keys are declared with ON DELETE CASCADE, but SQLite only enforces
+  // them when PRAGMA foreign_keys is on, and D1 leaves it off. These indexes make
+  // the explicit deletes in the app cheap instead.
+  `CREATE INDEX IF NOT EXISTS idx_stage_order_stage ON order_stages(order_id, stage)`,
+  `CREATE INDEX IF NOT EXISTS idx_orders_created ON orders(created_at DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customer)`,
 ];
 
 let ready: Promise<void> | null = null;

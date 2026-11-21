@@ -211,11 +211,91 @@ export async function setPassword(db: D1Database, sub: string, passHash: string)
 }
 
 // ---------------- sessions ----------------
-export async function createSession(db: D1Database, sub: string, tokenHash: string, expiresAt: string) {
+export async function createSession(
+  db: D1Database,
+  sub: string,
+  tokenHash: string,
+  expiresAt: string,
+  meta: { userAgent?: string | null; ip?: string | null } = {},
+) {
+  const at = nowISO();
   await db
-    .prepare('INSERT INTO sessions (token_hash, sub, created_at, expires_at) VALUES (?, ?, ?, ?)')
-    .bind(tokenHash, sub, nowISO(), expiresAt)
+    .prepare(
+      `INSERT INTO sessions (token_hash, sub, created_at, expires_at, user_agent, ip, last_seen)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .bind(tokenHash, sub, at, expiresAt, meta.userAgent || null, meta.ip || null, at)
     .run();
+}
+
+export type SessionInfo = {
+  id: string;          // short public id (first 16 chars of the hash) — never the token
+  token_hash: string;  // kept server-side only
+  created_at: string;
+  expires_at: string;
+  user_agent: string | null;
+  ip: string | null;
+  last_seen: string | null;
+  sub?: string;
+  email?: string | null;
+  name?: string | null;
+};
+
+/** Sessions for one user, newest first. */
+export async function listUserSessions(db: D1Database, sub: string): Promise<SessionInfo[]> {
+  const { results } = await db
+    .prepare(
+      `SELECT token_hash, created_at, expires_at, user_agent, ip, last_seen
+         FROM sessions WHERE sub = ? AND expires_at > ?
+        ORDER BY COALESCE(last_seen, created_at) DESC`,
+    )
+    .bind(sub, nowISO())
+    .all<SessionInfo>();
+  return (results || []).map((r) => ({ ...r, id: String(r.token_hash).slice(0, 16) }));
+}
+
+/** Sessions across every user, for the admin view. */
+export async function listAllSessions(db: D1Database, limit = 200): Promise<SessionInfo[]> {
+  const { results } = await db
+    .prepare(
+      `SELECT s.token_hash, s.created_at, s.expires_at, s.user_agent, s.ip, s.last_seen,
+              s.sub, u.email, u.name
+         FROM sessions s LEFT JOIN users u ON u.sub = s.sub
+        WHERE s.expires_at > ?
+        ORDER BY COALESCE(s.last_seen, s.created_at) DESC LIMIT ?`,
+    )
+    .bind(nowISO(), Math.min(1000, Math.max(1, limit)))
+    .all<SessionInfo>();
+  return (results || []).map((r) => ({ ...r, id: String(r.token_hash).slice(0, 16) }));
+}
+
+export async function touchSession(db: D1Database, tokenHash: string, lastSeen: string) {
+  // Cheap: only write when the stored value is older than an hour, so a busy
+  // screen does not rewrite the row on every poll.
+  await db
+    .prepare('UPDATE sessions SET last_seen = ? WHERE token_hash = ? AND (last_seen IS NULL OR last_seen < ?)')
+    .bind(lastSeen, tokenHash, new Date(Date.now() - 3600_000).toISOString())
+    .run();
+}
+
+export async function revokeSession(db: D1Database, idOrHash: string, sub?: string) {
+  const prefix = String(idOrHash || '');
+  if (prefix.length < 8) return 0;
+  const sql = sub
+    ? 'DELETE FROM sessions WHERE token_hash LIKE ? || \'%\' AND sub = ?'
+    : 'DELETE FROM sessions WHERE token_hash LIKE ? || \'%\'';
+  const stmt = sub ? db.prepare(sql).bind(prefix, sub) : db.prepare(sql).bind(prefix);
+  const res = await stmt.run();
+  return Number((res as any)?.meta?.changes ?? 1);
+}
+
+/** Every session except the current one — "sign out everywhere else". */
+export async function revokeOtherSessions(db: D1Database, sub: string, keepHash: string) {
+  const res = await db
+    .prepare('DELETE FROM sessions WHERE sub = ? AND token_hash != ?')
+    .bind(sub, keepHash)
+    .run();
+  return Number((res as any)?.meta?.changes ?? 0);
 }
 
 /** Session user, or null when the token is unknown/expired/disabled. */
@@ -639,10 +719,16 @@ export async function setOrderApproval(
     .run();
 }
 
+/**
+ * Deletes an order and everything hanging off it. Notifications point at the
+ * order too: leaving them behind put alerts for an order that no longer exists
+ * in people's bell, which then opened a blank drawer.
+ */
 export async function deleteOrder(db: D1Database, id: string) {
   await db.batch([
     db.prepare('DELETE FROM order_stages WHERE order_id = ?').bind(id),
     db.prepare('DELETE FROM dispatches WHERE order_id = ?').bind(id),
+    db.prepare('DELETE FROM notifications WHERE order_id = ?').bind(id),
     db.prepare('DELETE FROM orders WHERE id = ?').bind(id),
   ]);
 }
@@ -703,12 +789,39 @@ export async function logEvent(
     .run();
 }
 
-export async function listEvents(db: D1Database, limit = 200) {
-  const { results } = await db
-    .prepare('SELECT id, at, actor_name, entity, entity_id, action, detail FROM events ORDER BY id DESC LIMIT ?')
-    .bind(limit)
-    .all();
+export type EventFilter = {
+  limit?: number;
+  entity?: string;      // order | dispatch | user | settings | session | ...
+  actor?: string;       // actor sub
+  q?: string;           // free text over detail / entity_id / actor_name
+  before?: number;      // id < before, for "older" paging
+};
+
+export async function listEvents(db: D1Database, limitOrFilter: number | EventFilter = 200) {
+  const f: EventFilter = typeof limitOrFilter === 'number' ? { limit: limitOrFilter } : limitOrFilter || {};
+  const limit = Math.min(500, Math.max(1, Number(f.limit) || 200));
+  const where: string[] = [];
+  const args: any[] = [];
+  if (f.entity) { where.push('entity = ?'); args.push(f.entity); }
+  if (f.actor) { where.push('actor_sub = ?'); args.push(f.actor); }
+  if (f.before) { where.push('id < ?'); args.push(f.before); }
+  if (f.q) {
+    where.push('(detail LIKE ? OR entity_id LIKE ? OR actor_name LIKE ?)');
+    const like = `%${String(f.q).slice(0, 80)}%`;
+    args.push(like, like, like);
+  }
+  const sql =
+    `SELECT id, at, actor_sub, actor_name, entity, entity_id, action, detail FROM events
+     ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+     ORDER BY id DESC LIMIT ?`;
+  const { results } = await db.prepare(sql).bind(...args, limit).all();
   return results || [];
+}
+
+/** The entity types actually present, so the filter only offers real ones. */
+export async function listEventEntities(db: D1Database): Promise<string[]> {
+  const { results } = await db.prepare('SELECT DISTINCT entity FROM events ORDER BY entity').all<{ entity: string }>();
+  return (results || []).map((r) => r.entity);
 }
 
 // ---------------- notifications outbox ----------------

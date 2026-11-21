@@ -110,9 +110,61 @@ export function validEmail(v: unknown): string | null {
   return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(s) && s.length <= 160 ? s : null;
 }
 
+/**
+ * Passwords that turn up at the top of every breach list. Blocking these is the
+ * single cheapest way to stop an account being guessed, and it costs the user
+ * nothing because they are already told to pick something else.
+ */
+const WEAK_PASSWORDS = new Set([
+  'password', 'password1', 'password123', 'passw0rd', '12345678', '123456789',
+  '1234567890', 'qwerty123', 'qwertyuiop', 'abc12345', 'iloveyou', 'admin123',
+  'welcome1', 'letmein1', 'changeme', 'arsolartech', 'solartech', 'solar1234',
+  'india123', 'pune1234', 'sunshine1', 'football', 'baseball', 'superman',
+]);
+
 export function passwordProblem(pw: unknown): string | null {
   const s = String(pw ?? '');
   if (s.length < 8) return 'Password must be at least 8 characters';
   if (s.length > 200) return 'Password is too long';
+  if (WEAK_PASSWORDS.has(s.toLowerCase().trim())) {
+    return 'That password is too common. Pick something only you would know.';
+  }
+  if (/^(.)\1+$/.test(s)) return 'A password cannot be one character repeated';
   return null;
+}
+
+/** 0-4, for the strength meter in the UI. Length matters more than symbols. */
+export function passwordScore(pw: unknown): number {
+  const s = String(pw ?? '');
+  if (!s) return 0;
+  let score = 0;
+  if (s.length >= 8) score += 1;
+  if (s.length >= 12) score += 1;
+  if (s.length >= 16) score += 1;
+  const classes = [/[a-z]/, /[A-Z]/, /[0-9]/, /[^A-Za-z0-9]/].filter((r) => r.test(s)).length;
+  if (classes >= 2) score += 1;
+  if (WEAK_PASSWORDS.has(s.toLowerCase().trim())) return Math.min(score, 1);
+  return Math.min(4, score);
+}
+
+/** A short, human label for a session row: browser + OS, best effort. */
+export function describeAgent(ua: string | null): string {
+  const s = String(ua || '');
+  if (!s) return 'Unknown device';
+  const browser =
+    /Edg\//.test(s) ? 'Edge'
+    : /OPR\//.test(s) ? 'Opera'
+    : /Chrome\//.test(s) ? 'Chrome'
+    : /Firefox\//.test(s) ? 'Firefox'
+    : /Safari\//.test(s) ? 'Safari'
+    : /curl|node|wrangler/i.test(s) ? 'Script'
+    : 'Browser';
+  const os =
+    /Windows/.test(s) ? 'Windows'
+    : /Android/.test(s) ? 'Android'
+    : /iPhone|iPad/.test(s) ? 'iOS'
+    : /Mac OS X/.test(s) ? 'macOS'
+    : /Linux/.test(s) ? 'Linux'
+    : '';
+  return os ? `${browser} on ${os}` : browser;
 }

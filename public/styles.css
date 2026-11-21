@@ -1129,3 +1129,38 @@ select { cursor: pointer; appearance: none; background-image: none; padding-righ
   .ai-fab { width: 46px; height: 46px; padding: 0; justify-content: center; }
   .ai-panel { width: calc(100vw - 24px); height: min(70vh, 520px); }
 }
+
+/* ── password strength ───────────────────────────────────────── */
+.pw-meter { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; margin-top: 8px; }
+.pw-meter i { height: 4px; border-radius: 999px; background: var(--line-2, rgba(255,255,255,.09)); transition: background .18s ease; }
+.pw-meter i.on { background: var(--red, #f87171); }
+.pw-meter[data-score="2"] i.on { background: var(--amber, #fbbf24); }
+.pw-meter[data-score="3"] i.on { background: #60a5fa; }
+.pw-meter[data-score="4"] i.on { background: var(--green, #4ade80); }
+.pw-hint { display: block; margin-top: 6px; font-size: 11px; color: var(--text-3); }
+.pw-hint[data-score="2"] { color: var(--amber, #fbbf24); }
+.pw-hint[data-score="3"] { color: #60a5fa; }
+.pw-hint[data-score="4"] { color: var(--green, #4ade80); }
+
+/* ── devices ─────────────────────────────────────────────────── */
+.dev-ico {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 30px; height: 30px; flex: 0 0 30px; border-radius: 9px;
+  background: var(--surface-2); border: 1px solid var(--line-2, var(--line));
+  color: var(--text-2);
+}
+.dev-ico svg { width: 16px; height: 16px; }
+
+/* ── audit search ────────────────────────────────────────────── */
+.search-wrap { position: relative; display: inline-flex; align-items: center; }
+.search-wrap > svg {
+  position: absolute; left: 10px; width: 14px; height: 14px;
+  color: var(--text-3); pointer-events: none;
+}
+.search-wrap .search { padding-left: 32px; min-width: 230px; }
+
+.tl-badge {
+  display: inline-block; margin-right: 8px; padding: 1px 7px; border-radius: 6px;
+  font-size: 10px; font-weight: 600; letter-spacing: .3px; text-transform: uppercase;
+  color: var(--text-2); background: var(--surface-2); border: 1px solid var(--line-2, var(--line));
+}
