@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      # The Worker is bundled by esbuild, so a build failure is a type/syntax
+      # failure: this is the check that would have caught a broken deploy.
+      - run: npm run build
+      - name: Fail on stray debug or test files
+        run: |
+          if git ls-files | grep -E '(^|/)(\.probe|probe[0-9]|uitest|team)\.mjs$'; then
+            echo "Test scratch files are tracked"; exit 1
+          fi
+      - name: Sanity-check the SPA syntax
+        run: node --check public/app.js

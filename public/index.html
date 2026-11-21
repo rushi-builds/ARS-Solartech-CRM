@@ -108,14 +108,22 @@
       </div>
 
       <div class="top-actions">
+        <!-- Auto-synced: the pill shows how fresh this screen is, nothing to click. -->
         <div class="seg">
-          <span class="pill live" id="todayPill">—</span>
-          <button class="icon-btn" id="refreshBtn" title="Reload data" aria-label="Reload data">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 4v5h-5"/></svg>
+          <button class="sync-chip" id="syncChip" type="button" data-act="sync-check"
+                  title="Live — changes from your team appear here on their own"
+                  aria-live="polite" aria-describedby="syncAgo">
+            <span class="sync-dot sync-ok" id="syncDot"></span>
+            <span class="sync-date" id="todayPill">—</span>
+            <span class="sync-ago" id="syncAgo">live</span>
           </button>
         </div>
 
         <div class="seg">
+          <div class="menu-wrap">
+            <button class="icon-btn" data-act="theme" id="themeBtn" aria-label="Switch colour theme" title="Switch theme"></button>
+          </div>
+
           <div class="menu-wrap">
             <button class="icon-btn" data-act="notif" aria-label="Notifications" aria-haspopup="true">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8.5a6 6 0 1 0-12 0c0 5-2 6.2-2 6.2h16s-2-1.2-2-6.2"/><path d="M10.4 19.4a2 2 0 0 0 3.2 0"/></svg>
@@ -129,10 +137,6 @@
               <div class="pop-body" id="notifList"></div>
               <div class="pop-foot"><a href="#/activity" data-act="close-panels">Open activity log</a></div>
             </div>
-          </div>
-
-          <div class="menu-wrap">
-            <button class="icon-btn" data-act="theme" id="themeBtn" aria-label="Switch colour theme" title="Switch theme"></button>
           </div>
         </div>
 

@@ -350,12 +350,42 @@ small { font-size: 11.5px; }
   padding: 5px 10px; border-radius: 999px; border: 1px solid var(--line);
   background: var(--surface-2); color: var(--text-2); white-space: nowrap;
 }
-.pill.live { color: var(--ok-ink); border-color: var(--ok-line); background: var(--ok-soft); }
-.pill.live::before {
-  content: ""; width: 5px; height: 5px; border-radius: 50%; background: var(--ok);
-  margin-right: 7px; box-shadow: 0 0 0 3px var(--ok-soft);
+
+/* Live sync chip: reads like a status, not a button. Dot + date + "just now". */
+.sync-chip {
+  display: inline-flex; align-items: center; gap: 7px; height: 30px;
+  padding: 0 10px 0 9px; border: 0; border-radius: 9px; background: transparent;
+  color: var(--text-2); font: inherit; cursor: default;
+  -webkit-tap-highlight-color: transparent;
 }
-.seg .pill.live { border-color: transparent; background: transparent; padding: 0 9px; height: 30px; }
+.sync-chip:hover { background: var(--hover); }
+.sync-chip:focus-visible { outline: none; box-shadow: var(--ring); }
+.sync-dot {
+  width: 6px; height: 6px; border-radius: 50%; background: var(--ok); flex: none;
+  box-shadow: 0 0 0 3px var(--ok-soft);
+  transition: background .2s ease, box-shadow .2s ease;
+}
+.sync-ok { animation: breathe 2.8s ease-in-out infinite; }
+/* anything late or off-SOP: the dot turns amber so the top bar itself is a KPI */
+.sync-chip.has-alerts .sync-dot {
+  background: var(--warn); box-shadow: 0 0 0 3px var(--warn-soft);
+}
+.sync-chip.has-alerts .sync-ago { color: var(--warn-ink); border-left-color: var(--warn-line); }
+.sync-syncing { background: var(--warn, #d9a441); box-shadow: 0 0 0 3px rgba(217, 164, 65, .18); animation: breathe .9s ease-in-out infinite; }
+.sync-off { background: var(--bad); box-shadow: 0 0 0 3px rgba(220, 80, 80, .16); animation: none; }
+.sync-date { font-size: 11px; font-weight: 550; color: var(--text-2); white-space: nowrap; }
+.sync-ago {
+  font-size: 10px; font-weight: 600; letter-spacing: .01em; color: var(--text-3);
+  white-space: nowrap; padding-left: 7px; margin-left: 1px;
+  border-left: 1px solid var(--line);
+  font-variant-numeric: tabular-nums;
+}
+.sync-ago.flash { color: var(--ok-ink); }
+.sync-syncing .sync-ago, .sync-chip[data-state="syncing"] .sync-ago { color: var(--text-2); }
+.sync-off-text { color: var(--bad); font-weight: 650; }
+@media (prefers-reduced-motion: reduce) {
+  .sync-ok, .sync-syncing, .sync-dot { animation: none; }
+}
 
 .view { position: relative; padding: 26px 28px 88px; width: 100%; max-width: 1640px; }
 .view.enter > * { animation: rise .34s cubic-bezier(.22, .8, .25, 1) both; }
@@ -552,6 +582,16 @@ tfoot td { color: var(--text-2); font-weight: 600; }
 .cust small, .sub-line { display: block; color: var(--text-3); font-size: 11px; margin-top: 3px; font-weight: 400; }
 .empty { text-align: center; color: var(--text-3); padding: 34px 12px; font-size: 12.5px; line-height: 1.6; }
 
+/* ── inline note ─────────────────────────────────────────────── */
+.note {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px;
+  padding: 12px 14px; border-radius: 12px; font-size: 11.5px; line-height: 1.55;
+  color: var(--text-2); background: var(--surface-2);
+  border: 1px solid var(--line-2);
+}
+.note strong { color: var(--text); font-weight: 600; }
+.note b { color: var(--text); font-weight: 600; }
+
 /* ── badges, bars, chips ─────────────────────────────────────── */
 .badge {
   display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px; border-radius: 999px;
@@ -746,6 +786,7 @@ select { cursor: pointer; appearance: none; background-image: none; padding-righ
   .nav .nav-sep { display: none; }
   .topbar { height: auto; min-height: 64px; padding: 11px 16px; gap: 12px; flex-wrap: wrap; }
   .page-head .sub, .seg .pill { display: none; }
+  .sync-ago { display: none; }
   .view { padding: 18px 16px 70px; }
   .top-sep { display: none; }
   .h-title { font-size: 22px; }
