@@ -16,7 +16,8 @@
       "database_id": "local-dev"
     }
   ],
-  "vars": {
-    "APP_ORIGIN": "http://localhost:8787"
-  }
+  // APP_ORIGIN is deliberately unset: the Worker then derives the origin from
+  // the request, so the same dev server works on localhost:8787, on a LAN IP and
+  // behind the workspace preview proxy (which serves a different host).
+  "vars": {}
 }
