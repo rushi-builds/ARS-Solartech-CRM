@@ -49,6 +49,19 @@ identity provider, so it runs in any Cloudflare account.
 7. Capacity is *working-day* overlap × MT per day per week, so weekends and
    holidays are never counted as capacity.
 
+## Staying current
+
+There is no reload button: the workspace keeps itself live, like any other
+modern web app. The browser polls `/api/revision` (a ~200-byte change token made
+of table counts and the newest `updated_at`), and only pulls a full snapshot when
+that token actually moves. Polling pauses while the tab is hidden, while a form is
+focused, while a modal or menu is open, and for a moment after your own edit; if a
+change arrives at a bad moment it waits and applies itself as soon as you are free.
+At rest that is one tiny request every 20 seconds and zero workspace downloads.
+
+The top bar shows the status instead of a control: a dot (green = live, amber =
+late orders or SOP alerts, red = connection lost) plus the date and "just now".
+
 ## Roles
 
 | Role | Can do |

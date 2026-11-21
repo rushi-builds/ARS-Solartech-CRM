@@ -61,6 +61,174 @@ function toggleTheme() {
 function closePanels() {
   ['#notifPanel', '#accountMenu'].forEach((sel) => { const el = $(sel); if (el) el.hidden = true; });
 }
+
+/* ── live sync ─────────────────────────────────────────────────
+   Every other workspace (Notion, Linear, Figma) keeps itself current and has
+   no reload button. Same deal here, and it stays cheap:
+
+   · a poll asks /api/revision, which is a handful of COUNTs + MAX(updated_at),
+     not the workspace;
+   · a full snapshot is only pulled when that token actually moves;
+   · polling pauses while the tab is hidden, while you type, while a modal is
+     open, while a dropdown is open, and for a moment after your own change
+     (the change already returned a fresh snapshot);
+   · if a refresh would interrupt something, it waits and retries — nothing
+     you are looking at ever jumps.
+   Cost at rest: one tiny request every 20s, and zero full snapshots. */
+const SYNC = {
+  token: null,        // last revision the screen is known to match
+  seen: null,         // newest revision a poll has reported
+  pollMs: 20000,      // at-rest poll interval (hidden tab: no polling at all)
+  busyUntil: 0,       // quiet window after our own mutation
+  pending: false,     // a change was found while we were busy
+  inflight: false,
+  timer: 0,
+  lastSync: 0,
+  lastError: null,
+  capture: false,     // the poll below asked for the snapshot now in flight
+  seq: 0,             // bumped on every mutation response, to spot stale pulls
+};
+
+function syncBusy() {
+  const active = document.activeElement;
+  const typing = !!(active && /^(INPUT|TEXTAREA|SELECT)$/.test(active.tagName));
+  const modalOpen = $('#modal')?.classList.contains('open');
+  const panelOpen = ['#notifPanel', '#accountMenu', '#aiPanel']
+    .some((sel) => { const el = $(sel); return el && !el.hidden; });
+  return typing || modalOpen || panelOpen || document.hidden || Date.now() < SYNC.busyUntil;
+}
+
+/** Record the token that came back with a mutation so we do not re-fetch it. */
+function syncMark(revision) {
+  if (revision) SYNC.token = SYNC.seen = String(revision);
+  SYNC.busyUntil = Date.now() + 2500;
+  SYNC.pending = false;
+  syncPaint(true);
+}
+
+function syncAgoText() {
+  if (!SYNC.lastSync) return 'live';
+  const s = Math.round((Date.now() - SYNC.lastSync) / 1000);
+  if (s < 10) return 'just now';
+  if (s < 60) return `${s}s ago`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m}m ago`;
+  return `${Math.round(m / 60)}h ago`;
+}
+
+function syncPaint(freshlySynced = false) {
+  const chip = $('#syncChip');
+  const ago = $('#syncAgo');
+  const dot = $('#syncDot');
+  if (!chip || !ago) return;
+  const delta = S.d && S.d.dashboard && S.d.dashboard.kpis
+    ? (S.d.dashboard.kpis.red || 0) + (S.d.dashboard.kpis.sopAlerts || 0)
+    : 0;
+  chip.classList.toggle('has-alerts', delta > 0);
+  const offline = SYNC.seen === null && SYNC.lastError;
+  chip.dataset.state = SYNC.inflight ? 'syncing' : offline ? 'offline' : 'ok';
+  if (dot) dot.className = 'sync-dot ' + (SYNC.inflight ? 'sync-syncing' : offline ? 'sync-off' : 'sync-ok');
+  ago.textContent = SYNC.inflight ? 'syncing' : offline ? 'offline' : syncAgoText();
+  ago.classList.toggle('sync-off-text', !!offline && !SYNC.inflight);
+  ago.classList.toggle('flash', freshlySynced && !SYNC.inflight && !offline);
+  if (freshlySynced) setTimeout(() => ago.classList.remove('flash'), 1400);
+  chip.title = offline
+    ? 'Connection lost — retrying on its own'
+    : 'Live — changes from your team appear here on their own';
+}
+
+async function syncPull() {
+  if (SYNC.inflight) return;
+  SYNC.inflight = true;
+  const seqAtStart = SYNC.seq;
+  syncPaint();
+  try {
+    const snap = await api('/api/bootstrap');
+    // You changed something while this was in flight: their response is newer
+    // than this snapshot, so drop it and pick the change up on the next tick.
+    if (SYNC.seq !== seqAtStart) { SYNC.pending = true; return; }
+    S.d = snap;
+    saveCache();
+    SYNC.lastSync = Date.now();
+    SYNC.lastError = null;
+    if (snap.revision && SYNC.capture) SYNC.token = SYNC.seen = String(snap.revision);
+    SYNC.capture = false;
+    // A render would fight the user if they are mid-edit; retry shortly.
+    if (syncBusy()) { SYNC.pending = true; return; }
+    render();
+    SYNC.pending = false;
+  } catch (e) {
+    if (e.status === 401) { clearCache(); stopSync(); showGate(); return; }
+    SYNC.lastError = e.message || 'offline';
+  } finally {
+    SYNC.inflight = false;
+    syncPaint(true);
+  }
+}
+
+async function syncTick() {
+  clearTimeout(SYNC.timer);
+  if (document.hidden) {                       // hidden tab: no traffic at all
+    SYNC.timer = setTimeout(syncTick, SYNC.pollMs);
+    return;
+  }
+  if (SYNC.inflight) { SYNC.timer = setTimeout(syncTick, SYNC.pollMs); return; }
+  if (SYNC.pending) {
+    // A change is already known and only waited for the screen to be free.
+    if (syncBusy()) { SYNC.timer = setTimeout(syncTick, 1200); return; }
+    await syncPull();
+    SYNC.timer = setTimeout(syncTick, SYNC.pollMs);
+    return;
+  }
+  SYNC.timer = setTimeout(syncTick, SYNC.pollMs);
+  SYNC.inflight = true;
+  syncPaint();
+  try {
+    const rev = await api('/api/revision');
+    SYNC.inflight = false;
+    // Remember that *this* poll is what asked for the next snapshot. If the user
+    // changes something in the meantime, their response wins and this flag is
+    // dropped (see apply), so a slow fetch can never roll the screen back.
+    SYNC.capture = SYNC.token !== null && String(rev.token) !== SYNC.token;
+    SYNC.seen = String(rev.token);
+    SYNC.lastError = null;
+    if (SYNC.token === null) SYNC.token = SYNC.seen;
+    // A new day moves every overdue counter and the RAG colour, and no row
+    // changes when midnight passes — so the date is part of the change test.
+    const dayMoved = !!rev.today && !!S.d && rev.today !== S.d.today;
+    if (dayMoved || SYNC.seen !== SYNC.token) {
+      if (syncBusy()) { SYNC.pending = true; syncPaint(); return; }
+      await syncPull();
+      return;
+    }
+    syncPaint();
+  } catch (e) {
+    SYNC.inflight = false;
+    if (e.status === 401) { clearCache(); stopSync(); showGate(); return; }
+    SYNC.lastError = e.message || 'offline';
+    syncPaint();
+  }
+}
+
+function stopSync() {
+  clearTimeout(SYNC.timer);
+  SYNC.timer = 0;
+}
+
+function startSync() {
+  stopSync();
+  SYNC.lastSync = Date.now();
+  syncPaint(true);
+  SYNC.timer = setTimeout(syncTick, SYNC.pollMs);
+}
+
+/* Coming back to the tab is the moment people expect freshness. */
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && S.d) syncTick();
+});
+
+/* Cheap freshness while idle: repaint the "just now / 2m ago" label. */
+setInterval(() => { if (S.d) syncPaint(); }, 15000);
 function togglePanel(sel) {
   const el = $(sel);
   if (!el) return;
@@ -135,6 +303,14 @@ function cap(action) {
 function apply(payload) {
   const snap = payload && payload.snapshot ? payload.snapshot : payload;
   if (snap && snap.me) { S.d = snap; saveCache(); }
+  // Any full snapshot is newer than a poll that is still in flight.
+  SYNC.capture = false;
+  SYNC.seq += 1;
+  // The mutation (or snapshot) just told us where the server is, so the next
+  // poll does not see our own write as somebody else's change. Login and setup
+  // carry the token inside the snapshot instead of beside it.
+  const rev = (payload && payload.revision) || (snap && snap.revision);
+  if (rev) syncMark(rev);
 }
 
 /* ── cached snapshot ───────────────────────────────────────────
@@ -146,7 +322,7 @@ const CACHE_TTL = 5 * 60_000;
 
 function saveCache() {
   try {
-    if (S.d) sessionStorage.setItem(CACHE_KEY, JSON.stringify({ at: Date.now(), snap: S.d }));
+    if (S.d) sessionStorage.setItem(CACHE_KEY, JSON.stringify({ at: Date.now(), snap: S.d, rev: SYNC.token || undefined }));
   } catch { /* storage full or blocked - not fatal */ }
 }
 
@@ -156,7 +332,7 @@ function readCache() {
     if (!raw) return null;
     const parsed = JSON.parse(raw);
     if (!parsed || !parsed.snap || !parsed.snap.me) return null;
-    return { at: Number(parsed.at) || 0, snap: parsed.snap };
+    return { at: Number(parsed.at) || 0, snap: parsed.snap, rev: parsed.rev || null };
   } catch { return null; }
 }
 
@@ -180,6 +356,7 @@ async function loadApp() {
   try {
     S.d = await api('/api/bootstrap');
     saveCache();
+    if (S.d.revision) syncMark(S.d.revision);
     render();
   } catch (e) {
     if (e.status === 401) { clearCache(); showGate(e.data && e.data.needsSetup ? 'setup' : 'login'); }
@@ -2137,6 +2314,7 @@ const ACTIONS = {
   'add-user': () => addUserModal(),
   'reset-password': (el) => resetPasswordModal(el.dataset.id, el.dataset.name || 'user'),
   signout: async () => {
+    stopSync();
     try { await api('/api/auth/logout', 'POST'); } catch { /* ignore */ }
     clearCache();
     S.d = null;
@@ -2243,9 +2421,12 @@ document.addEventListener('input', (ev) => {
   if (ev.target.id === 'fStage') { S.stage = ev.target.value; render(); }
 });
 
-$('#refreshBtn').addEventListener('click', async () => {
-  try { apply(await api('/api/bootstrap')); render(); toast('Refreshed', 'ok'); }
-  catch (e) { toast(e.message, 'err'); }
+// The status chip is not a reload button — but tapping it forces a sync, which
+// is what anyone instinctively tries. It just never looks like a control.
+document.addEventListener('click', (ev) => {
+  if (!ev.target.closest || !ev.target.closest('[data-act="sync-check"]')) return;
+  if (Date.now() < SYNC.busyUntil) return;
+  syncPull();
 });
 
 function routeFromHash() {
@@ -2275,8 +2456,11 @@ document.addEventListener('keydown', (ev) => {
     // Render the last snapshot instantly. Only ask the server when it is stale,
     // so repeat opens/reloads cost zero Worker requests.
     S.d = cached.snap;
+    SYNC.token = cached.rev ? String(cached.rev) : null;
     render();
+    startSync();
     if (Date.now() - cached.at < CACHE_TTL) return;
   }
   await loadApp();
+  startSync();
 })();

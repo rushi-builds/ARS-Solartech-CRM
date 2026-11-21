@@ -480,6 +480,44 @@ async function notifyUser(c: any, target: User, title: string, body: string, ord
   return channels.length;
 }
 
+// ---------------------------------------------------------------- live sync
+/**
+ * Change token for the live-sync poll: seven tiny metadata reads (counts plus
+ * the newest updated_at per table) and nothing else. It costs a fraction of a
+ * full snapshot, so the browser can afford to poll it while idle. Anything a
+ * per-row read would notice — a stage turning overdue at midnight — is handled
+ * by the client re-checking the date it already has.
+ */
+async function revisionToken(db: D1Database): Promise<string> {
+  const q = async (sql: string) => {
+    try {
+      return await db.prepare(sql).first<any>();
+    } catch {
+      return null;
+    }
+  };
+  const [settings, orders, stages, dispatches, users, people, requests, events] = await Promise.all([
+    q('SELECT updated_at FROM settings WHERE id = 1'),
+    q('SELECT COUNT(*) AS n, MAX(updated_at) AS at FROM orders'),
+    q('SELECT COUNT(*) AS n, MAX(updated_at) AS at FROM order_stages'),
+    q('SELECT COUNT(*) AS n, MAX(COALESCE(updated_at, created_at)) AS at FROM dispatches'),
+    q('SELECT COUNT(*) AS n, MAX(updated_at) AS at FROM users'),
+    q('SELECT COUNT(*) AS n, MAX(created_at) AS at FROM dept_people'),
+    q("SELECT COUNT(*) AS n, MAX(COALESCE(decided_at, created_at)) AS at FROM access_requests"),
+    q('SELECT COUNT(*) AS n, MAX(id) AS at FROM events'),
+  ]);
+  return [
+    settings?.updated_at || '',
+    orders?.n ?? 0, orders?.at || '',
+    stages?.n ?? 0, stages?.at || '',
+    dispatches?.n ?? 0, dispatches?.at || '',
+    users?.n ?? 0, users?.at || '',
+    people?.n ?? 0, people?.at || '',
+    requests?.n ?? 0, requests?.at || '',
+    events?.n ?? 0, events?.at || '',
+  ].join('|');
+}
+
 async function snapshot(c: any) {
   const env = c.env as Env;
   // Load the caller fresh: a PATCH may have just changed this account's own
@@ -506,6 +544,7 @@ async function snapshot(c: any) {
   const escalationList = escalations(enriched, settings, today);
   const outbox = await listNotifications(db, 40, caps.users ? undefined : user.sub);
   return {
+    revision: await revisionToken(db),
     me: user,
     capabilities: caps,
     settings,
@@ -1122,6 +1161,12 @@ app.post('/api/escalations/run', async (c) => {
   await logEvent(c.env.DB, { sub: me.sub, name: me.name }, 'order', null, 'escalation',
     `${list.length} overdue order(s) checked, ${alerts} alert(s) queued`);
   return c.json({ ok: true, orders: list.length, alerts, snapshot: await snapshot(c) });
+});
+
+// Light poll target for the live-sync client (see revisionToken above).
+app.get('/api/revision', async (c) => {
+  const me: User = c.get('user');
+  return c.json({ token: await revisionToken(c.env.DB), today: todayISO(), sub: me.sub });
 });
 
 // Send one alert to yourself to prove the channels work.
