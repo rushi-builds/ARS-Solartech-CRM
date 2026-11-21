@@ -102,6 +102,30 @@ the request (set it only if you serve the app from several hostnames).
 Custom domain: Workers & Pages → your Worker → Settings → Domains & Routes →
 Add custom domain.
 
+### File attachments (optional bucket)
+
+Attachments work out of the box: without any extra setup the file is stored in
+D1, capped at **1 MB per file** (enough for a PO PDF or a drawing photo).
+
+For bigger files, bind an R2 bucket and the app switches over automatically:
+
+```bash
+npx wrangler r2 bucket create ars-attachments
+```
+
+Then add the binding to `wrangler.jsonc` and redeploy:
+
+```jsonc
+"r2_buckets": [
+  { "binding": "FILES", "bucket_name": "ars-attachments" }
+]
+```
+
+With `FILES` bound the limit becomes **8 MB per file** and blobs live in the
+bucket while the metadata stays in D1. No code change and no migration is
+needed — the app reports which storage it is using in
+`GET /api/attachments`.
+
 ## Importing orders
 
 Excel workbook → *Save as CSV* → **Import** in the app. Recognised headers:
