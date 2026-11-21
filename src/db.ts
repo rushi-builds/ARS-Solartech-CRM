@@ -1,5 +1,5 @@
 import {
-  DEFAULT_ACCESS, DEFAULT_SETTINGS, STAGES, type AccessMap, type Actuals, type Settings,
+  DEFAULT_ACCESS, DEFAULT_SETTINGS, STAGES, validDate, type AccessMap, type Actuals, type Settings,
   type StageKey, liveStatus, planOrder, capacityPlan, type PlanOrder, NUMBERED_STAGES,
 } from './plan';
 
@@ -7,13 +7,20 @@ import {
 export type Role = 'owner' | 'admin' | 'manager' | 'editor' | 'viewer' | (string & {});
 
 /**
- * The designated super admin. This account is always the owner, can never be
- * demoted or disabled, and is promoted automatically on sign-in.
+ * The designated super admin, if the deployment sets one. A personal address
+ * used to be compiled into this file, which meant anybody with the Users power
+ * could reset that person's password and sign in as them. It is now a Worker
+ * variable/secret (`ROOT_ADMIN_EMAIL`) and simply absent by default — the first
+ * owner account is already the owner and does not need a second back door.
  */
-export const ROOT_ADMIN_EMAIL = 'rushidhumal.04@gmail.com';
+export function rootAdminEmail(env?: { ROOT_ADMIN_EMAIL?: string }): string | null {
+  const v = String(env?.ROOT_ADMIN_EMAIL || '').trim().toLowerCase();
+  return v || null;
+}
 
-export function isRootAdmin(u: { email?: string | null } | null): boolean {
-  return !!u && String(u.email || '').trim().toLowerCase() === ROOT_ADMIN_EMAIL;
+export function isRootAdmin(u: { email?: string | null } | null, env?: { ROOT_ADMIN_EMAIL?: string }): boolean {
+  const root = rootAdminEmail(env);
+  return !!root && !!u && String(u.email || '').trim().toLowerCase() === root;
 }
 
 export type User = {
@@ -59,6 +66,25 @@ export function isDeptSuperAdmin(u: { dept?: string | null; dept_admin?: number 
   return /^super[\s_-]*admin$/i.test(String(u.dept || '').trim());
 }
 
+// Stage actions belong to exactly one department, so "only the stages of their
+// department" (the rule the README states) is expressible without touching the
+// editable matrix, which stays the authority for the broader actions.
+const STAGE_DEPT: Record<string, string> = {
+  des: 'Design', apr: 'Design', mat: 'Purchase', ps: 'Production', pf: 'Production',
+  qc: 'QA/QC', dsp: 'Dispatch', disp: 'Dispatch',
+};
+
+/** Stores keeps the same material action as Purchase. */
+const DEPT_ALIAS: Record<string, string> = { Stores: 'Purchase' };
+
+/** Departments that never had a preset keep the stage-level default. */
+const STAGE_ACTIONS: Action[] = ['des', 'apr', 'mat', 'ps', 'pf', 'qc', 'dsp', 'disp'];
+
+function deptFor(u: User): string | null {
+  const d = String(u.dept || '').trim();
+  return d ? DEPT_ALIAS[d] || d : null;
+}
+
 export function can(u: User | null, action: Action, access?: AccessMap): boolean {
   if (!u || !u.active) return false;
   // The owner is never limited, whatever the matrix says.
@@ -68,7 +94,16 @@ export function can(u: User | null, action: Action, access?: AccessMap): boolean
   if (isDeptSuperAdmin(u) && action === 'settings') return true;
   const map = access || DEFAULT_ACCESS;
   const preset = map[u.role];
-  if (preset) return preset.includes(action);
+  if (preset) {
+    if (!preset.includes(action)) return false;
+    // An Editor is scoped to its own department; managers and above are not.
+    // A department the matrix has no rule for keeps Editor-level stage access.
+    if (u.role === 'editor' && STAGE_ACTIONS.includes(action)) {
+      const dept = deptFor(u);
+      if (dept && DEPT_ACTIONS[dept]) return STAGE_DEPT[action] === dept;
+    }
+    return true;
+  }
   // Any custom role falls through to the department rules below, i.e. it has
   // Editor-level access scoped to its own department.
   if (action === 'users' || action === 'settings' || action === 'approve') return false;
@@ -206,7 +241,7 @@ export async function purgeSessions(db: D1Database) {
 }
 
 /**
- * Legacy Freebuff sign-in helper, kept for the old rows: the very first account
+ * Legacy sign-in helper, kept for the old rows: the very first account
  * becomes owner, everyone else starts as viewer until an admin assigns a role.
  */
 export async function ensureUser(
@@ -415,7 +450,18 @@ export async function listOrderRows(db: D1Database): Promise<OrderRow[]> {
   const { results } = await db
     .prepare('SELECT * FROM orders ORDER BY (status = \'open\') DESC, due_date IS NULL, due_date, id')
     .all<OrderRow>();
-  return results || [];
+  // Rows written before dates were validated can still hold "31/12/2026".
+  // Reading is the right place to neutralise them: the planner then treats the
+  // order as simply undated instead of throwing on somebody's dashboard.
+  return (results || []).map(scrubOrderDates);
+}
+
+/** Drop date values that are not real calendar days (see listOrderRows). */
+function scrubOrderDates(row: any) {
+  for (const k of ['po_date', 'conf_date', 'due_date']) {
+    if (row[k] !== null && row[k] !== undefined && !validDate(row[k])) row[k] = null;
+  }
+  return row;
 }
 
 export type StageRow = {
@@ -433,14 +479,24 @@ export async function listStageRows(db: D1Database): Promise<StageRow[]> {
   const { results } = await db
     .prepare('SELECT order_id, stage, actual_date, planned_date, assigned_sub, assigned_name, done_sub, done_name FROM order_stages')
     .all<StageRow>();
-  return results || [];
+  // Same defence as listOrderRows: a legacy stage date is ignored, not fatal.
+  return (results || []).map((r) => {
+    if (r.actual_date && !validDate(r.actual_date)) r.actual_date = null;
+    if (r.planned_date && !validDate(r.planned_date)) r.planned_date = null;
+    return r;
+  });
 }
 
 export async function listDispatchRows(db: D1Database): Promise<DispatchRow[]> {
   const { results } = await db
     .prepare('SELECT * FROM dispatches ORDER BY COALESCE(adate, pdate, created_at) DESC')
     .all<DispatchRow>();
-  return results || [];
+  // Legacy rows again: a bad date in the dispatch log is ignored, not fatal.
+  return (results || []).map((r) => {
+    if (r.pdate && !validDate(r.pdate)) r.pdate = null;
+    if (r.adate && !validDate(r.adate)) r.adate = null;
+    return r;
+  });
 }
 
 export type EnrichedOrder = OrderRow & {
@@ -499,6 +555,10 @@ export async function saveOrder(db: D1Database, id: string, body: Record<string,
     if (v === '' || v === null) return null;
     if (k === 'kwp' || k === 'mt') return Number(v);
     if (k === 'o_des' || k === 'o_pro' || k === 'o_prd') return Number(v) || null;
+    // Stored dates must be real calendar days. The planner does date maths on
+    // every row, so one "31/12/2026" used to throw and blank the whole
+    // workspace for everyone; anything unreadable is kept as "no date".
+    if (k === 'po_date' || k === 'conf_date' || k === 'due_date') return validDate(String(v));
     return String(v);
   };
   const cols = ['customer', 'project', 'structure_type', 'kwp', 'mt', 'po_date', 'conf_date', 'due_date', 'priority', 'sales_owner', 'o_des', 'o_pro', 'o_prd', 'remarks', 'status'];
@@ -602,7 +662,8 @@ export async function saveDispatch(
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
-        d.id, d.order_id, d.batch || null, Number(d.qty) || 0, d.pdate || null, d.adate || null,
+        d.id, d.order_id, d.batch || null, Number(d.qty) || 0,
+        validDate(d.pdate) || null, validDate(d.adate) || null,
         d.vehicle || null, d.transporter || null, d.invoice || null, d.eway || null, d.lr || null,
         d.qc_ref || null, d.remarks || null, at, by,
       )
@@ -614,7 +675,8 @@ export async function saveDispatch(
     for (const c of cols) {
       if (d[c] === undefined) continue;
       sets.push(`${c} = ?`);
-      vals.push(c === 'qty' ? Number(d[c]) || 0 : d[c] === '' ? null : d[c]);
+      if (c === 'pdate' || c === 'adate') vals.push(validDate(d[c]) || null);
+      else vals.push(c === 'qty' ? Number(d[c]) || 0 : d[c] === '' ? null : d[c]);
     }
     sets.push('updated_at = ?');
     vals.push(at, d.id);

@@ -125,15 +125,17 @@ function syncPaint(freshlySynced = false) {
     ? (S.d.dashboard.kpis.red || 0) + (S.d.dashboard.kpis.sopAlerts || 0)
     : 0;
   chip.classList.toggle('has-alerts', delta > 0);
-  const offline = SYNC.seen === null && SYNC.lastError;
-  chip.dataset.state = SYNC.inflight ? 'syncing' : offline ? 'offline' : 'ok';
-  if (dot) dot.className = 'sync-dot ' + (SYNC.inflight ? 'sync-syncing' : offline ? 'sync-off' : 'sync-ok');
-  ago.textContent = SYNC.inflight ? 'syncing' : offline ? 'offline' : syncAgoText();
-  ago.classList.toggle('sync-off-text', !!offline && !SYNC.inflight);
-  ago.classList.toggle('flash', freshlySynced && !SYNC.inflight && !offline);
+  // Two different problems, two different words: no connection at all versus
+  // the worker answering with an error. Neither should ever read as "live".
+  const trouble = !!SYNC.lastError;
+  chip.dataset.state = SYNC.inflight ? 'syncing' : trouble ? 'offline' : 'ok';
+  if (dot) dot.className = 'sync-dot ' + (SYNC.inflight ? 'sync-syncing' : trouble ? 'sync-off' : 'sync-ok');
+  ago.textContent = SYNC.inflight ? 'syncing' : trouble ? 'not synced' : syncAgoText();
+  ago.classList.toggle('sync-off-text', trouble && !SYNC.inflight);
+  ago.classList.toggle('flash', freshlySynced && !SYNC.inflight && !trouble);
   if (freshlySynced) setTimeout(() => ago.classList.remove('flash'), 1400);
-  chip.title = offline
-    ? 'Connection lost — retrying on its own'
+  chip.title = trouble
+    ? 'Could not refresh — retrying on its own. ' + String(SYNC.lastError)
     : 'Live — changes from your team appear here on their own';
 }
 
@@ -151,6 +153,8 @@ async function syncPull() {
     saveCache();
     SYNC.lastSync = Date.now();
     SYNC.lastError = null;
+    SYNC.failures = 0;
+    SYNC.pollMs = 20000;
     if (snap.revision && SYNC.capture) SYNC.token = SYNC.seen = String(snap.revision);
     SYNC.capture = false;
     // A render would fight the user if they are mid-edit; retry shortly.
@@ -159,7 +163,11 @@ async function syncPull() {
     SYNC.pending = false;
   } catch (e) {
     if (e.status === 401) { clearCache(); stopSync(); showGate(); return; }
-    SYNC.lastError = e.message || 'offline';
+    // A snapshot that fails is not "offline" — the screen simply could not keep
+    // up. Say so, and retry on a slowing backoff rather than in a tight loop.
+    SYNC.lastError = e.message || 'Could not refresh';
+    SYNC.failures = (SYNC.failures || 0) + 1;
+    SYNC.pollMs = Math.min(120000, 20000 * Math.pow(1.6, SYNC.failures));
   } finally {
     SYNC.inflight = false;
     syncPaint(true);
@@ -192,6 +200,8 @@ async function syncTick() {
     SYNC.capture = SYNC.token !== null && String(rev.token) !== SYNC.token;
     SYNC.seen = String(rev.token);
     SYNC.lastError = null;
+    SYNC.failures = 0;
+    SYNC.pollMs = 20000;
     if (SYNC.token === null) SYNC.token = SYNC.seen;
     // A new day moves every overdue counter and the RAG colour, and no row
     // changes when midnight passes — so the date is part of the change test.
@@ -199,6 +209,9 @@ async function syncTick() {
     if (dayMoved || SYNC.seen !== SYNC.token) {
       if (syncBusy()) { SYNC.pending = true; syncPaint(); return; }
       await syncPull();
+      // Pulling a snapshot must not end the loop: without this the screen
+      // refreshed exactly once after any real change and then went quiet.
+      SYNC.timer = setTimeout(syncTick, SYNC.pollMs);
       return;
     }
     syncPaint();
@@ -1319,7 +1332,9 @@ function viewSettings() {
   const s = S.d.settings;
   const canEdit = cap('settings');
   // Access control is the admin-only part of Settings: it needs the account's
-  // department to be Super Admin. Planning, calendar, teams and alerts stay.
+  // department to be Super Admin (the server refuses the matrix otherwise, and
+  // says so). Planning, calendar, teams and alerts stay open to everyone with
+  // the Settings power.
   const canAccess = isDeptSuper(S.d.me);
   const canPower = cap('users');
   const POWER_KEYS = ['users', 'settings', 'delete', 'approve'];
@@ -1418,6 +1433,10 @@ function viewSettings() {
     </div>
   </div>
 
+  ${canAccess ? '' : `<div class="note" style="margin-top:14px">
+    <strong>Access control is locked.</strong>
+    Only the <b>Super Admin</b> department can change who-may-do-what. Planning, calendar, teams and alerts below are yours to edit.
+  </div>`}
   ${canAccess ? `<div class="card flush" style="margin-top:14px">
     <div class="card-head">
       <div class="lead">
@@ -1995,15 +2014,28 @@ function parseCsv(text) {
 
 const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 
+/* A real calendar day as YYYY-MM-DD, or null. An import with "2026-13-45" in
+   the date column used to send it straight to the server; a bad date in one row
+   then broke every screen. Validation belongs here as well as on the server. */
+const MONTH_DAYS = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+function realDay(y, m, d) {
+  y = Number(y); m = Number(m); d = Number(d);
+  if (!(y >= 1900 && y <= 2200) || !(m >= 1 && m <= 12) || !(d >= 1)) return null;
+  const leap = (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0;
+  const max = m === 2 && leap ? 29 : MONTH_DAYS[m - 1];
+  if (d > max) return null;
+  return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+}
+
 function parseDate(v) {
   const s = String(v || '').trim();
   if (!s) return null;
-  let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
-  if (m) return `${m[1]}-${String(+m[2]).padStart(2, '0')}-${String(+m[3]).padStart(2, '0')}`;
+  let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (m) return realDay(m[1], m[2], m[3]);
   m = s.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})$/);
   if (m) {
     const y = m[3].length === 2 ? '20' + m[3] : m[3];
-    return `${y}-${String(+m[2]).padStart(2, '0')}-${String(+m[1]).padStart(2, '0')}`;
+    return realDay(y, m[2], m[1]);
   }
   const d = new Date(s);
   if (!isNaN(d.getTime())) return d.toISOString().slice(0, 10);

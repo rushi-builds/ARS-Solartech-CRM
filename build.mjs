@@ -1,4 +1,4 @@
-// Bundles the Worker and prepares the Freebuff Sites deployment manifest.
+// Bundles the Worker and prepares the deployment manifest.
 import { build } from 'esbuild';
 import { cp, mkdir, rm, writeFile } from 'node:fs/promises';
 

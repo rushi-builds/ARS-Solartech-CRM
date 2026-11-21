@@ -84,17 +84,52 @@ export const DEPTS = [
 
 // ---------- dates (all dates are plain YYYY-MM-DD, treated as UTC) ----------
 export const iso = (d: Date): string => d.toISOString().slice(0, 10);
-export const parse = (s: string): Date => new Date(s + 'T00:00:00Z');
+
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const MONTH_DAYS = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
+/**
+ * A real calendar day as YYYY-MM-DD, or null. `2026-02-31` and `2026-13-01`
+ * pass a naive regex, so the month and day are checked against the year's
+ * actual calendar (leap years included) before the value is trusted.
+ */
+export function validDate(v: unknown): string | null {
+  if (typeof v !== 'string') return null;
+  const s = v.trim();
+  if (!DATE_RE.test(s)) return null;
+  const y = +s.slice(0, 4);
+  const m = +s.slice(5, 7);
+  const d = +s.slice(8, 10);
+  if (m < 1 || m > 12 || d < 1) return null;
+  const leap = (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0;
+  const max = m === 2 && leap ? 29 : MONTH_DAYS[m - 1];
+  return d > max ? null : s;
+}
+
+/**
+ * Parse a date for the planner. Never returns an Invalid Date: the planner
+ * does arithmetic on whatever it is given, so one unparseable value in one row
+ * used to throw inside toISOString() and take the whole snapshot down with it.
+ * An unusable value is treated as "no date" instead.
+ */
+export const parse = (s: string): Date => {
+  const ok = validDate(s);
+  return ok ? new Date(ok + 'T00:00:00Z') : new Date(NaN);
+};
+
 export const todayISO = (now: Date = new Date()): string => iso(now);
 
 export function addDays(s: string, n: number): string {
   const d = parse(s);
+  if (Number.isNaN(d.getTime())) return s;
   d.setUTCDate(d.getUTCDate() + n);
   return iso(d);
 }
 
+/** Days from b to a; NaN inputs would poison every comparison, so return 0. */
 export function dayDiff(a: string, b: string): number {
-  return Math.round((parse(a).getTime() - parse(b).getTime()) / 86400000);
+  const diff = parse(a).getTime() - parse(b).getTime();
+  return Number.isFinite(diff) ? Math.round(diff / 86400000) : 0;
 }
 
 function isWorking(d: Date, s: Settings, hol: Set<string>): boolean {
@@ -105,6 +140,7 @@ function isWorking(d: Date, s: Settings, hol: Set<string>): boolean {
 export function addWorkingDays(start: string, n: number, s: Settings): string {
   const hol = new Set(s.holidays);
   const d = parse(start);
+  if (Number.isNaN(d.getTime())) return start;
   let left = Math.max(0, Math.trunc(n));
   if (left === 0) {
     let guard = 0;
@@ -124,6 +160,7 @@ export function workingDaysBetween(a: string, b: string, s: Settings): number {
   const hol = new Set(s.holidays);
   const d = parse(a);
   const end = parse(b);
+  if (Number.isNaN(d.getTime()) || Number.isNaN(end.getTime())) return 0;
   let n = 0;
   while (d <= end) {
     if (isWorking(d, s, hol)) n++;
@@ -135,6 +172,7 @@ export function workingDaysBetween(a: string, b: string, s: Settings): number {
 /** Monday of the week containing the given date. */
 export function weekStart(s: string): string {
   const d = parse(s);
+  if (Number.isNaN(d.getTime())) return s;
   d.setUTCDate(d.getUTCDate() - ((d.getUTCDay() + 6) % 7));
   return iso(d);
 }
@@ -156,7 +194,7 @@ export type Plan = {
 };
 
 export function planOrder(o: PlanOrder, s: Settings): Plan | null {
-  if (!o.conf_date) return null;
+  if (!validDate(o.conf_date)) return null;
   const des = addWorkingDays(o.conf_date, o.o_des ?? s.dur.des, s);
   const apr = addWorkingDays(des, s.dur.apr, s);
   const mat = addWorkingDays(des, o.o_pro ?? s.dur.pro, s);
@@ -223,12 +261,15 @@ export function liveStatus(
 
   const plannedDispatch = plan ? plan.dsp : null;
   const forecastDispatch = plan ? (idx === 6 ? (a.dsp || plan.dsp) : addDays(plan.dsp, daysOverdue)) : null;
-  const bufferDays = plannedDispatch && o.due_date ? dayDiff(o.due_date, plannedDispatch) : null;
+  // A due date that is not a calendar day is no due date; without this, a
+  // hand-edited row would make bufferDays NaN and the RAG colour meaningless.
+  const dueDate = validDate(o.due_date);
+  const bufferDays = plannedDispatch && dueDate ? dayDiff(dueDate, plannedDispatch) : null;
 
   let rag: Live['rag'];
   if (idx === 6) rag = 'CLOSED';
   else if (!plan) rag = 'NOT PLANNED';
-  else if (o.due_date && forecastDispatch && forecastDispatch > o.due_date) rag = 'RED';
+  else if (dueDate && forecastDispatch && forecastDispatch > dueDate) rag = 'RED';
   else if (daysOverdue > 0) rag = 'AMBER';
   else if (bufferDays != null && bufferDays < s.tight) rag = 'AMBER';
   else rag = 'GREEN';
@@ -288,7 +329,7 @@ export function capacityPlan(
   weeks = 16,
   today: string = todayISO(),
 ): CapacityWeek[] {
-  const first = weekStart(today);
+  const first = weekStart(validDate(today) || todayISO());
   const out: CapacityWeek[] = [];
   for (let w = 0; w < weeks; w++) {
     const start = addDays(first, w * 7);

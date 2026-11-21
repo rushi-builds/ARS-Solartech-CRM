@@ -1,6 +1,7 @@
 // ARS Solartech - Order to Dispatch Management System
-// Cloudflare Worker: Sign in with Freebuff + role-based API + static SPA.
+// Cloudflare Worker: email + password auth, role-based JSON API and the SPA.
 import { Hono } from 'hono';
+import { HTTPException } from 'hono/http-exception';
 
 import { ensureSchema } from './schema';
 
@@ -34,6 +35,7 @@ import {
   STAGES,
   dayDiff,
   todayISO,
+  validDate,
   type Settings,
   type StageKey,
 } from './plan';
@@ -104,6 +106,8 @@ export interface Env {
   OPENAI_API_KEY?: string;
   AI_BASE_URL?: string;
   AI_MODEL?: string;
+  // Optional: the account that always stays owner (see db.rootAdminEmail).
+  ROOT_ADMIN_EMAIL?: string;
 }
 
 type Ctx = { Bindings: Env; Variables: { user: User; caps: Record<string, boolean> } };
@@ -126,6 +130,37 @@ function roleValue(v: unknown): Role | null {
 }
 
 const app = new Hono<Ctx>();
+
+// Cheap hardening on every response. Headers coming back from the asset binding
+// are immutable, so they are copied onto a fresh Response rather than edited.
+app.use('*', async (c, next) => {
+  await next();
+  const h = new Headers(c.res.headers);
+  if (!h.has('X-Content-Type-Options')) h.set('X-Content-Type-Options', 'nosniff');
+  if (!h.has('X-Frame-Options')) h.set('X-Frame-Options', 'SAMEORIGIN');
+  if (!h.has('Referrer-Policy')) h.set('Referrer-Policy', 'strict-origin-when-cross-origin');
+  if (!h.has('Permissions-Policy')) h.set('Permissions-Policy', 'geolocation=(), microphone=(), camera=()');
+  if (!h.has('Content-Security-Policy')) {
+    h.set(
+      'Content-Security-Policy',
+      [
+        "default-src 'self'",
+        "img-src 'self' data:",
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+        "font-src 'self' https://fonts.gstatic.com",
+        "script-src 'self'",
+        "connect-src 'self'",
+        "frame-ancestors 'self'",
+        "base-uri 'self'",
+        "form-action 'self'",
+      ].join('; '),
+    );
+  }
+  if (new URL(c.req.url).protocol === 'https:' && !h.has('Strict-Transport-Security')) {
+    h.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  }
+  c.res = new Response(c.res.body, { status: c.res.status, statusText: c.res.statusText, headers: h });
+});
 
 // APP_ORIGIN is set on managed hosting; a plain Cloudflare deploy derives it
 // from the request so cookies and the origin guard still work out of the box.
@@ -162,7 +197,7 @@ app.post('/api/auth/setup', async (c) => {
   if (!(await noUsersYet(c.env.DB))) {
     return c.json({ error: 'setup_closed', message: 'An admin account already exists. Ask them for an account.' }, 403);
   }
-  const body = await c.req.json().catch(() => ({}));
+  const body = await jsonBody(c);
   const email = validEmail(body.email);
   if (!email) return c.json({ error: 'bad_email', message: 'Enter a valid email address' }, 400);
   const problem = passwordProblem(body.password);
@@ -183,17 +218,68 @@ app.post('/api/auth/setup', async (c) => {
   return c.json({ ok: true, me: user, snapshot: await snapshot(c) });
 });
 
+/**
+ * Simple in-memory throttle for sign-in attempts: 10 wrong passwords for the
+ * same email (or from the same address) inside 5 minutes and the next tries
+ * are refused before the password hash is even computed. Per isolate, which is
+ * enough to stop a scripted guessing loop without adding a table or a KV
+ * namespace to every deployment.
+ */
+const LOGIN_FAILS = new Map<string, { n: number; until: number }>();
+const LOGIN_WINDOW_MS = 5 * 60_000;
+const LOGIN_MAX_FAILS = 10;
+
+function loginBlocked(keys: string[]): number {
+  const now = Date.now();
+  let wait = 0;
+  for (const k of keys) {
+    const rec = LOGIN_FAILS.get(k);
+    if (!rec) continue;
+    if (rec.until && rec.until <= now) { LOGIN_FAILS.delete(k); continue; }
+    if (rec.n >= LOGIN_MAX_FAILS) wait = Math.max(wait, Math.ceil((rec.until - now) / 1000));
+  }
+  return wait;
+}
+
+function noteLoginFail(keys: string[]) {
+  const now = Date.now();
+  if (LOGIN_FAILS.size > 5000) LOGIN_FAILS.clear();       // keep memory bounded
+  for (const k of keys) {
+    const rec = LOGIN_FAILS.get(k);
+    if (!rec || (rec.until && rec.until <= now)) LOGIN_FAILS.set(k, { n: 1, until: now + LOGIN_WINDOW_MS });
+    else rec.n += 1;
+  }
+}
+
+function clearLoginFails(keys: string[]) {
+  for (const k of keys) LOGIN_FAILS.delete(k);
+}
+
 app.post('/api/auth/login', async (c) => {
   await ensureSchemaOnce(c.env.DB);
   if (!sameOrigin(c.req.raw, siteOrigin(c))) return c.json({ error: 'bad_origin' }, 403);
-  const body = await c.req.json().catch(() => ({}));
+  const body = await jsonBody(c);
   const email = validEmail(body.email);
   const password = String(body.password ?? '');
   if (!email || !password) return c.json({ error: 'bad_credentials', message: 'Email and password are required' }, 400);
 
+  const ip = c.req.header('cf-connecting-ip') || c.req.header('x-forwarded-for') || 'local';
+  const throttleKeys = ['email:' + email, 'ip:' + ip];
+  const wait = loginBlocked(throttleKeys);
+  if (wait > 0) {
+    return c.json(
+      { error: 'too_many_attempts', message: `Too many attempts. Try again in ${Math.ceil(wait / 60)} minute(s).` },
+      429,
+    );
+  }
+
   const row = await findUserByEmail(c.env.DB, email);
   const ok = row ? await verifyPassword(password, row.pass_hash) : false;
-  if (!row || !ok) return c.json({ error: 'bad_credentials', message: 'Wrong email or password' }, 401);
+  if (!row || !ok) {
+    noteLoginFail(throttleKeys);
+    return c.json({ error: 'bad_credentials', message: 'Wrong email or password' }, 401);
+  }
+  clearLoginFails(throttleKeys);
   if (!row.active) return c.json({ error: 'account_disabled', message: 'This account is disabled' }, 403);
 
   await purgeSessions(c.env.DB);
@@ -209,7 +295,7 @@ app.post('/api/auth/login', async (c) => {
   };
   // The designated super admin always comes back as owner, even if a row in an
   // older database still points at another role.
-  if (isRootAdmin(user) && user.role !== 'owner') {
+  if (isRootAdmin(user, c.env) && user.role !== 'owner') {
     await updateUser(c.env.DB, user.sub, { role: 'owner' });
     user.role = 'owner';
     await logEvent(c.env.DB, { sub: user.sub, name: user.name }, 'user', user.sub, 'role',
@@ -260,6 +346,28 @@ app.use('/api/*', async (c, next) => {
 });
 
 // ---------------------------------------------------------------- helpers
+/** JSON body that is always a plain object, so `body.x` can never throw. */
+/**
+ * Request body as a plain object. A body that is not valid JSON is a client
+ * error, not an empty object: silently treating "{oops" as {} let a create
+ * request "succeed" while throwing away everything the caller sent.
+ * An empty body still means {} (logout and a few PATCHes rely on that).
+ */
+async function jsonBody(c: any): Promise<Record<string, any>> {
+  const raw = await c.req.text();
+  if (!raw.trim()) return {};
+  let v: any;
+  try {
+    v = JSON.parse(raw);
+  } catch {
+    throw new HTTPException(400, { res: c.json({ error: 'bad_json', message: 'The request body is not valid JSON' }, 400) });
+  }
+  if (!v || typeof v !== 'object' || Array.isArray(v)) {
+    throw new HTTPException(400, { res: c.json({ error: 'bad_json', message: 'The request body must be a JSON object' }, 400) });
+  }
+  return v;
+}
+
 function guard(c: any, action: Action) {
   const caps: Record<string, boolean> = c.get('caps') || {};
   if (!caps[action]) {
@@ -288,9 +396,11 @@ const num = (v: unknown): number | null => {
   return Number.isFinite(n) ? n : null;
 };
 
+// Real calendar day only (2026-02-31 and 2026-13-01 are rejected here, not by
+// a loose regex), so a mistyped stage date can never reach the planner.
 const date = (v: unknown): string | null => {
   const s = str(v, 10);
-  return s && /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : null;
+  return s ? validDate(s) : null;
 };
 
 export type RosterPerson = {
@@ -594,7 +704,7 @@ app.get('/api/bootstrap', async (c) => c.json(await snapshot(c)));
 app.post('/api/orders', async (c) => {
   const denied = guard(c, 'order');
   if (denied) return denied;
-  const body = await c.req.json().catch(() => ({}));
+  const body = await jsonBody(c);
   const id = str(body.id, 40) || (await nextId(c.env.DB, fyPrefix(), 'orders'));
   const exists = await c.env.DB.prepare('SELECT 1 AS x FROM orders WHERE id = ?').bind(id).first();
   if (exists) return c.json({ error: 'duplicate_id', message: `Order ${id} already exists` }, 409);
@@ -612,7 +722,7 @@ app.patch('/api/orders/:id', async (c) => {
   const id = c.req.param('id');
   const exists = await c.env.DB.prepare('SELECT 1 AS x FROM orders WHERE id = ?').bind(id).first();
   if (!exists) return c.json({ error: 'not_found' }, 404);
-  const body = await c.req.json().catch(() => ({}));
+  const body = await jsonBody(c);
   await saveOrder(c.env.DB, id, body, c.get('user').sub, false);
   const u: User = c.get('user');
   await logEvent(c.env.DB, { sub: u.sub, name: u.name }, 'order', id, 'update', `${u.name || 'user'} updated order ${id}`);
@@ -640,7 +750,7 @@ app.post('/api/orders/:id/stages/:stage', async (c) => {
   const order = await c.env.DB.prepare('SELECT * FROM orders WHERE id = ?').bind(id).first<any>();
   if (!order) return c.json({ error: 'not_found' }, 404);
 
-  const body = await c.req.json().catch(() => ({}));
+  const body = await jsonBody(c);
   const d = body.date === null || body.date === '' ? null : date(body.date) || todayISO();
 
   const settings = await getSettings(c.env.DB);
@@ -680,7 +790,7 @@ app.post('/api/orders/:id/stages/:stage/assign', async (c) => {
   if (!order) return c.json({ error: 'not_found' }, 404);
 
   const me: User = c.get('user');
-  const body = await c.req.json().catch(() => ({}));
+  const body = await jsonBody(c);
   const sub = str(body.sub, 60);
   const full = me.role === 'owner' || me.role === 'admin' || me.role === 'manager';
   let name: string | null = null;
@@ -712,7 +822,7 @@ app.post('/api/orders/:id/approval', async (c) => {
   const id = c.req.param('id');
   const order = await c.env.DB.prepare('SELECT id FROM orders WHERE id = ?').bind(id).first();
   if (!order) return c.json({ error: 'not_found' }, 404);
-  const body = await c.req.json().catch(() => ({}));
+  const body = await jsonBody(c);
   const approve = body.decision !== 'reset';
 
   if (approve) {
@@ -737,7 +847,7 @@ app.post('/api/orders/:id/approval', async (c) => {
 app.post('/api/dept-people', async (c) => {
   const denied = guard(c, 'settings');
   if (denied) return denied;
-  const body = await c.req.json().catch(() => ({}));
+  const body = await jsonBody(c);
   const dept = deptName(body.dept);
   if (!dept) return c.json({ error: 'dept_required', message: 'Pick a department first' }, 400);
   const name = str(body.name, 80);
@@ -767,7 +877,7 @@ app.delete('/api/dept-people/:id', async (c) => {
 app.post('/api/dispatches', async (c) => {
   const denied = guard(c, 'disp');
   if (denied) return denied;
-  const body = await c.req.json().catch(() => ({}));
+  const body = await jsonBody(c);
   const orderId = str(body.order_id, 40);
   if (!orderId) return c.json({ error: 'order_required' }, 400);
   const order = await c.env.DB.prepare('SELECT id FROM orders WHERE id = ?').bind(orderId).first();
@@ -787,7 +897,7 @@ app.patch('/api/dispatches/:id', async (c) => {
   const denied = guard(c, 'disp');
   if (denied) return denied;
   const id = c.req.param('id');
-  const body = await c.req.json().catch(() => ({}));
+  const body = await jsonBody(c);
   await saveDispatch(c.env.DB, { ...body, id }, c.get('user').sub, false);
   const u: User = c.get('user');
   await logEvent(c.env.DB, { sub: u.sub, name: u.name }, 'dispatch', id, 'update', `${u.name || 'user'} updated dispatch ${id}`);
@@ -861,16 +971,43 @@ function sanitizeAccess(raw: any): Record<string, string[]> {
   return out;
 }
 
+/** Same role -> same actions, ignoring the order the browser sent them in. */
+function sameAccess(a: Record<string, string[]>, b: Record<string, string[]>): boolean {
+  const keys = new Set([...Object.keys(a || {}), ...Object.keys(b || {})]);
+  for (const k of keys) {
+    const x = [...(a?.[k] || [])].sort().join(',');
+    const y = [...(b?.[k] || [])].sort().join(',');
+    if (x !== y) return false;
+  }
+  return true;
+}
+
 // Settings a department super admin may not hand out: only someone with the
 // Users power can change the powerful roles or these actions.
 const POWER_ACTIONS = ['users', 'settings', 'delete', 'approve'];
 
+/**
+ * A department super admin without the Users power may edit the matrix, but
+ * cannot give power away or take it from the top roles. Their own weaker
+ * entries are respected; anything that would *raise* a role is ignored.
+ *
+ * This used to reset admin/manager to whatever was stored before, so simply
+ * saving the planning settings (the client posts the whole matrix) silently
+ * demoted every admin. Now a no-op save is a no-op.
+ */
 function restrictAccess(before: Record<string, string[]>, next: Record<string, string[]>): Record<string, string[]> {
   const out: Record<string, string[]> = { ...next };
-  for (const role of ['admin', 'manager']) out[role] = before[role] || DEFAULT_ACCESS[role] || [];
+  for (const role of ['admin', 'manager']) {
+    const kept = before[role] || DEFAULT_ACCESS[role] || [];
+    const asked = out[role] || kept;
+    // Keep exactly what was stored unless the new list is a strict subset of it.
+    out[role] = asked.every((a) => kept.includes(a)) ? asked : kept;
+  }
   for (const [role, list] of Object.entries(out)) {
     if (role === 'owner') continue;
-    out[role] = list.filter((a) => !POWER_ACTIONS.includes(a));
+    const beforeList = before[role] || [];
+    // Powerful actions only survive if they were already there.
+    out[role] = list.filter((a) => !POWER_ACTIONS.includes(a) || beforeList.includes(a));
   }
   out.owner = [...ACCESS_ACTIONS];
   return out;
@@ -879,7 +1016,7 @@ function restrictAccess(before: Record<string, string[]>, next: Record<string, s
 app.put('/api/settings', async (c) => {
   const denied = guard(c, 'settings');
   if (denied) return denied;
-  const body = await c.req.json().catch(() => ({}));
+  const body = await jsonBody(c);
   const s = sanitizeSettings(body);
   const u: User = c.get('user');
   // Without the Users power (a department super admin on a lower role) the
@@ -887,8 +1024,22 @@ app.put('/api/settings', async (c) => {
   const before = await getSettings(c.env.DB);
   // Access control belongs to the Super Admin department. Everyone else keeps
   // the rest of Settings but cannot change the matrix, even through the API.
-  if (!isDeptSuperAdmin(u)) s.access = before.access;
-  else if (!can(u, 'users', before.access)) s.access = restrictAccess(before.access, s.access);
+  if (!isDeptSuperAdmin(u)) {
+    s.access = before.access;
+    // Say so, instead of saving the plan and quietly dropping the matrix — that
+    // silent drop is what made the form look like it had worked.
+    if (!sameAccess(before.access, sanitizeSettings(body).access)) {
+      return c.json(
+        {
+          error: 'matrix_locked',
+          message: 'Only the Super Admin department can change Access control. Your planning settings were not saved.',
+        },
+        403,
+      );
+    }
+  } else if (!can(u, 'users', before.access)) {
+    s.access = restrictAccess(before.access, s.access);
+  }
   await saveSettings(c.env.DB, s, u.sub);
   await logEvent(c.env.DB, { sub: u.sub, name: u.name }, 'settings', '1', 'update',
     `Design ${s.dur.des}d, approval ${s.dur.apr}d, procurement ${s.dur.pro}d, capacity ${s.cap} MT/day`);
@@ -899,7 +1050,7 @@ app.put('/api/settings', async (c) => {
 app.put('/api/stakeholders', async (c) => {
   const denied = guard(c, 'settings');
   if (denied) return denied;
-  const body = await c.req.json().catch(() => ({}));
+  const body = await jsonBody(c);
   const rows = Array.isArray(body.rows) ? body.rows : [];
   const u: User = c.get('user');
   for (const [i, r] of rows.entries()) {
@@ -923,7 +1074,7 @@ app.put('/api/stakeholders', async (c) => {
 app.post('/api/users', async (c) => {
   const denied = guard(c, 'users');
   if (denied) return denied;
-  const body = await c.req.json().catch(() => ({}));
+  const body = await jsonBody(c);
   const email = validEmail(body.email);
   if (!email) return c.json({ error: 'bad_email', message: 'Enter a valid email address' }, 400);
   const problem = passwordProblem(body.password);
@@ -961,9 +1112,13 @@ app.patch('/api/users/:sub', async (c) => {
   const sub = c.req.param('sub');
   const target = await getUser(c.env.DB, sub);
   if (!target) return c.json({ error: 'not_found' }, 404);
-  const body = await c.req.json().catch(() => ({}));
+  const body = await jsonBody(c);
   const me: User = c.get('user');
 
+  // Only the account itself may replace the designated super admin's password.
+  if (isRootAdmin(target, c.env) && typeof body.password === 'string' && body.password && me.sub !== target.sub) {
+    return c.json({ error: 'protected_account', message: 'Only that account can change its own password' }, 403);
+  }
   const role = body.role === undefined ? undefined : (roleValue(body.role) ?? undefined);
   const dept = body.dept === undefined ? undefined : deptName(body.dept);
   const active = body.active === undefined ? undefined : body.active ? 1 : 0;
@@ -974,7 +1129,7 @@ app.patch('/api/users/:sub', async (c) => {
   }
 
   // The designated super admin keeps full control of the workspace for good.
-  if (isRootAdmin(target)) {
+  if (isRootAdmin(target, c.env)) {
     if (role && role !== 'owner') {
       return c.json({ error: 'protected_account', message: 'The super admin account always stays Admin' }, 400);
     }
@@ -1007,7 +1162,7 @@ app.patch('/api/users/:sub', async (c) => {
 // ---------------------------------------------------------------- access requests
 app.post('/api/access-requests', async (c) => {
   const me: User = c.get('user');
-  const body = await c.req.json().catch(() => ({}));
+  const body = await jsonBody(c);
   const askRole = str(body.role, 40) ? roleValue(body.role) : null;
   if (str(body.role, 40) && !askRole) {
     return c.json({ error: 'bad_role', message: 'That role name is not allowed' }, 400);
@@ -1046,7 +1201,7 @@ app.post('/api/access-requests/:id/decision', async (c) => {
   if (!req || req.status !== 'pending') {
     return c.json({ error: 'not_pending', message: 'That request is no longer open' }, 404);
   }
-  const body = await c.req.json().catch(() => ({}));
+  const body = await jsonBody(c);
   const approve = body.decision === 'approve';
   const note = str(body.note, 300);
   const me: User = c.get('user');
@@ -1071,7 +1226,7 @@ app.post('/api/access-requests/:id/decision', async (c) => {
 // ---------------------------------------------------------------- self password
 app.post('/api/auth/password', async (c) => {
   const me: User = c.get('user');
-  const body = await c.req.json().catch(() => ({}));
+  const body = await jsonBody(c);
   const row = await findUserByEmail(c.env.DB, me.email || '');
   if (!row || !(await verifyPassword(String(body.current ?? ''), row.pass_hash))) {
     return c.json({ error: 'bad_password', message: 'Current password is wrong' }, 400);
@@ -1087,7 +1242,7 @@ app.post('/api/auth/password', async (c) => {
 app.post('/api/import', async (c) => {
   const denied = guard(c, 'order');
   if (denied) return denied;
-  const body = await c.req.json().catch(() => ({}));
+  const body = await jsonBody(c);
   const rows = Array.isArray(body.rows) ? body.rows.slice(0, 500) : [];
   const u: User = c.get('user');
   let created = 0;
@@ -1194,7 +1349,7 @@ app.post('/api/ai/chat', async (c) => {
     );
   }
   const me: User = c.get('user');
-  const body = await c.req.json().catch(() => ({}));
+  const body = await jsonBody(c);
   const message = str(body.message, 4000);
   if (!message) return c.json({ error: 'empty', message: 'Type a question first' }, 400);
   const history = Array.isArray(body.history)
@@ -1227,7 +1382,9 @@ app.post('/api/ai/chat', async (c) => {
     escalations: snap.escalations,
   };
 
-  const base = String(c.env.AI_BASE_URL || 'https://freebuff.com/api/v1/paid').replace(/\/$/, '');
+  // Any OpenAI-compatible endpoint works; the default is OpenAI itself, so no
+  // third-party host is baked into the deployment.
+  const base = String(c.env.AI_BASE_URL || 'https://api.openai.com/v1').replace(/\/$/, '');
   const model = c.env.AI_MODEL || 'gpt-4o-mini';
   try {
     const res = await fetch(base + '/chat/completions', {
@@ -1269,7 +1426,10 @@ app.get('/api/activity', async (c) => {
 });
 
 // ---------------------------------------------------------------- static SPA
-app.all('*', (c) => c.env.ASSETS.fetch(c.req.raw));
+// notFound(), not app.all('*'): a catch-all also swallows every route Hono would
+// otherwise resolve, which silently skipped the headers middleware and the
+// "API 404 must be JSON" behaviour for anything that is not an /api route.
+app.notFound((c) => c.env.ASSETS.fetch(c.req.raw));
 
 export default {
   fetch(request: Request, env: Env): Promise<Response> {
